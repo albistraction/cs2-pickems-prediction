@@ -100,6 +100,7 @@ Dataset curate(const std::string& rawDir, int majorsWanted, const std::function<
     std::vector<RankedTeam> ranking;
     std::vector<PlayerCurrent> players;
     fs::file_time_type rankingTime{}, playersTime{};
+    std::map<std::string, std::pair<fs::file_time_type, EventInfo>> eventsByName;
     bool haveRanking = false, havePlayers = false;
 
     Counter byType, fileErrors;
@@ -143,6 +144,17 @@ Dataset curate(const std::string& rawDir, int majorsWanted, const std::function<
                         if (!r.empty()) { ranking = r; rankingTime = mtime; haveRanking = true; }
                     }
                     break;
+                case hltv::PageType::Event: {
+                    EventInfo ev;
+                    if (hltv::parseEvent(body, ev)) {
+                        auto it = eventsByName.find(ev.name);
+                        if (it == eventsByName.end() || mtime > it->second.first) {
+                            ev.updatedAt = util::nowString();
+                            eventsByName[ev.name] = {mtime, ev};
+                        }
+                    } else ++parseFailed;
+                    break;
+                }
                 case hltv::PageType::PlayerStats:
                     if (!havePlayers || mtime > playersTime) {
                         auto p = hltv::parsePlayerStats(body);
@@ -200,6 +212,9 @@ Dataset curate(const std::string& rawDir, int majorsWanted, const std::function<
         votes[teamKey(kv.second.team2)][util::trim(kv.second.team2)]++;
     }
     for (auto& t : ranking) votes[teamKey(t.name)][util::trim(t.name)] += 1000;  // ranking tem prioridade
+    for (auto& kv : eventsByName)
+        for (auto& st : kv.second.second.stages)
+            for (auto& t : st.teams) votes[teamKey(t.name)][util::trim(t.name)] += 1;
     std::map<std::string, std::string> display;
     json aliases = json::array();
     for (auto& kv : votes) {
@@ -326,6 +341,20 @@ Dataset curate(const std::string& rawDir, int majorsWanted, const std::function<
     ds.ranking = ranking;
     ds.players = cleanPlayers;
 
+    // eventos (estrutura de Majors): nomes de times padronizados
+    for (auto& kv : eventsByName) {
+        EventInfo ev = kv.second.second;
+        for (auto& st : ev.stages) {
+            for (auto& t : st.teams) t.name = canon(t.name);
+            for (auto& m : st.matches) {
+                if (!m.a.empty()) m.a = canon(m.a);
+                if (!m.b.empty()) m.b = canon(m.b);
+                if (!m.winner.empty()) m.winner = canon(m.winner);
+            }
+        }
+        ds.events.push_back(ev);
+    }
+
     if (ranking.empty()) warnings.push_back("Sem pagina de ranking: prior do ranking HLTV desativado.");
     if (cleanPlayers.empty()) warnings.push_back("Sem stats atuais de jogadores: usando so o historico das partidas.");
     if (ds.majors.empty()) warnings.push_back("Sem arquivo de Majors: partidas de Major nao serao marcadas.");
@@ -360,6 +389,9 @@ Dataset curate(const std::string& rawDir, int majorsWanted, const std::function<
                                         : json{{"inicio", ds.matches.front().date}, {"fim", ds.matches.back().date}};
     rep["majors"] = majorsJ;
     rep["ranking"] = ds.ranking.size();
+    json eventsJ = json::array();
+    for (auto& ev : ds.events) eventsJ.push_back({{"nome", ev.name}, {"estagios", ev.stages.size()}});
+    rep["eventos"] = eventsJ;
     rep["avisos"] = warnings;
     ds.report = rep;
 

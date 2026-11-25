@@ -7,7 +7,7 @@
 
 const BASE = 'https://www.hltv.org';
 const DAY = 86400000;
-const DEFAULTS = { site: '', token: '', majors: 10, diasRecentes: 120, intervaloS: 8 };
+const DEFAULTS = { site: '', token: '', majors: 10, diasRecentes: 120, intervaloS: 8, eventoUrl: '' };
 const $ = (s) => document.querySelector(s);
 
 let running = false;
@@ -120,6 +120,16 @@ function pageResults() {
     .filter(Boolean);
 }
 
+// Links de Majors em andamento/próximas na página /events
+function pageMajorLinks() {
+  const seen = new Set();
+  return [...document.querySelectorAll('a[href^="/events/"]')]
+    .map((a) => ({ href: a.getAttribute('href').split('#')[0], text: a.textContent.replace(/\s+/g, ' ').trim() }))
+    .filter((l) => /^\/events\/\d+\//.test(l.href) && /major/i.test(l.text) && !/qualifier|rmr|closed|open qual/i.test(l.text))
+    .filter((l) => (seen.has(l.href) ? false : seen.add(l.href)));
+}
+function pageHasEventJson() { return !!document.querySelector('[data-multi-stage-simulator-json]'); }
+
 // ------------------------------------------------------------------ controle da aba
 async function ensureWorker() {
   if (worker) {
@@ -217,6 +227,33 @@ async function sitePost(cfg, route, body, contentType) {
 }
 
 // ------------------------------------------------------------------ coleta
+// Página da Major (qualquer estágio): traz a estrutura completa (estágios, seeds, jogos, resultados).
+async function collectEvent(cfg, grab) {
+  let path = '';
+  if (cfg.eventoUrl) {
+    try {
+      const u = new URL(cfg.eventoUrl);
+      if (/(^|\.)hltv\.org$/.test(u.hostname) && u.pathname.startsWith('/events/')) path = u.pathname;
+    } catch { /* URL inválida: detecta automaticamente */ }
+  }
+  if (!path) {
+    status('Procurando a Major atual', 0.005);
+    log('Procurando a Major em hltv.org/events');
+    const tab = await open(cfg, '/events');
+    const links = await inTab(tab, pageMajorLinks);
+    if (!links || !links.length) {
+      log('Nenhuma Major encontrada em /events. Informe a URL da Major na configuração.', 'err');
+      return;
+    }
+    path = links[0].href;
+    log(`  encontrada: ${links[0].text}`);
+  }
+  status('Estrutura da Major', 0.01);
+  log(`Estrutura da Major (estágios, seeds, confrontos e resultados): ${path}`);
+  const tab = await grab(path, `event:${path}:${Date.now()}`);
+  if (tab && !(await inTab(tab, pageHasEventJson))) log('Essa página não tem a estrutura de estágios. Informe a URL de um estágio da Major.', 'err');
+}
+
 async function collect(cfg, mode) {
   const sent = new Set(await getStore('sent', []));
   const persistSent = () => setStore('sent', [...sent]);
@@ -241,6 +278,13 @@ async function collect(cfg, mode) {
   };
 
   try {
+    await collectEvent(cfg, grab);
+    if (mode === 'evento') {
+      await persistSent();
+      status('Concluído', 1);
+      return;
+    }
+
     status('Ranking atual', 0.01);
     log('Ranking atual de times');
     await grab('/ranking/teams', 'ranking');
@@ -322,6 +366,7 @@ async function loadConfig() {
   $('#majors').value = cfg.majors;
   $('#dias').value = cfg.diasRecentes;
   $('#intervalo').value = cfg.intervaloS;
+  $('#eventoUrl').value = cfg.eventoUrl || '';
   return cfg;
 }
 
@@ -356,6 +401,7 @@ $('#save').addEventListener('click', async () => {
     majors: Math.max(1, Number($('#majors').value) || DEFAULTS.majors),
     diasRecentes: Math.max(7, Number($('#dias').value) || DEFAULTS.diasRecentes),
     intervaloS: Math.max(3, Number($('#intervalo').value) || DEFAULTS.intervaloS),
+    eventoUrl: $('#eventoUrl').value.trim(),
   };
   await setStore('config', cfg);
   msg.textContent = (await testSite(cfg)) ? 'Salvo. Conexão com o site ok.' : 'Salvo, mas não consegui acessar o site.';
@@ -364,6 +410,7 @@ $('#save').addEventListener('click', async () => {
 function setRunning(on) {
   running = on;
   $('#full').disabled = on;
+  $('#event').disabled = on;
   $('#current').disabled = on;
   $('#reset').disabled = on;
   $('#save').disabled = on;
@@ -377,7 +424,7 @@ async function start(mode) {
   stopFlag = false;
   counters = { paginas: 0, enviadas: 0, verificacoes: 0 };
   setRunning(true);
-  log(mode === 'completa' ? '=== Coleta completa ===' : '=== Só dados atuais ===');
+  log({ completa: '=== Coleta completa ===', atuais: '=== Só dados atuais ===', evento: '=== Atualizar Major ===' }[mode]);
   try {
     await collect(cfg, mode);
   } catch (e) {
@@ -389,6 +436,7 @@ async function start(mode) {
   }
 }
 
+$('#event').addEventListener('click', () => start('evento'));
 $('#full').addEventListener('click', () => start('completa'));
 $('#current').addEventListener('click', () => start('atuais'));
 $('#stop').addEventListener('click', () => { stopFlag = true; log('Parando...'); });

@@ -27,8 +27,28 @@
   <main>
     <!-- =============================== PREVISÃO =============================== -->
     <section id="tab-predict" class="panel active">
+      <div class="card" id="eventCard">
+        <div class="card-head">
+          <h2>Evento</h2>
+          <div class="seg" id="modeSeg">
+            <button data-mode="evento" class="on">Major</button>
+            <button data-mode="manual">Manual</button>
+          </div>
+        </div>
+        <div id="eventPane">
+          <div class="event-pick">
+            <label class="field">Major
+              <select id="eventSelect"></select>
+            </label>
+            <p class="hint" id="eventHint"></p>
+          </div>
+          <div id="stageCards" class="stage-cards"></div>
+          <div id="stageBoard"></div>
+        </div>
+      </div>
+
       <div class="grid-2">
-        <div class="card">
+        <div class="card" id="manualCard">
           <div class="card-head">
             <h2>Estágio</h2>
             <div class="seg" id="formatSeg">
@@ -43,6 +63,12 @@
           </div>
           <div id="teamRows" class="team-rows"></div>
           <datalist id="teamList"></datalist>
+        </div>
+
+        <div class="card" id="eventTeamsCard" hidden>
+          <h2>Times do estágio</h2>
+          <p class="hint">Ajuste de força (±Elo) e lineup são cenários: stand-in, troca recente, jogador doente…</p>
+          <div id="eventTeamRows" class="team-rows"></div>
         </div>
 
         <div class="stack">

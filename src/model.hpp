@@ -89,8 +89,14 @@ struct TrainReport {
 TrainReport train(const std::vector<Match>& ms, const Params& start,
                   const std::function<void(const std::string&)>& log, const std::atomic<bool>& stop);
 
-// Previsão de um estágio (Swiss 16 ou Playoffs 8). Lança std::runtime_error em entrada inválida.
+// Previsão de um estágio. Com {"event", "stage"} usa a estrutura real da Major
+// (seeds, confrontos, resultados já jogados) e encadeia os estágios anteriores para
+// preencher vagas TBD. Sem "event", usa a lista manual {"format", "teams"}.
+// Lança std::runtime_error em entrada inválida.
 nlohmann::json predictEvent(const Engine& trained, const Dataset& data, const nlohmann::json& req);
+
+// Majors conhecidas com estágios, status, times e jogos.
+nlohmann::json eventsSummary(const Dataset& data);
 
 // Visão geral dos times (ranking + Elo + jogadores)
 nlohmann::json teamsOverview(const Engine& trained, const Dataset& data, int limit);

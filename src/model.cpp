@@ -307,7 +307,22 @@ double seriesProb(const std::vector<double>& adv, int bo) {
 struct SimModel {
     std::vector<double> r, sigma;
     std::vector<std::vector<double>> off;
-    std::map<std::pair<int, int>, int> forced;
+    std::map<std::pair<int, int>, int> forced;  // (menor, maior) índice global -> vencedor
+};
+
+// Jogo conhecido/agendado de um estágio Swiss (índices globais). winner -1 = ainda não jogado.
+struct FixedMatch {
+    int a, b, winner;
+};
+
+// Um estágio da cadeia simulada.
+struct ChainStage {
+    bool swiss = true;
+    std::string name;
+    std::vector<int> slots;                 // swiss: posição = seed-1 | playoffs: posições da chave
+    std::vector<std::pair<int, int>> qf;    // playoffs: pares de posições das quartas, na ordem da chave
+    std::map<std::pair<int, int>, std::vector<FixedMatch>> fixed;  // swiss: campanha (w,l) -> jogos
+    bool slotsKnown = true;                 // todas as vagas já definidas (sem TBD)
 };
 
 bool pairUp(const std::vector<int>& list, const std::vector<std::vector<int>>& opp, bool allowRematch,
@@ -341,58 +356,152 @@ public:
         for (size_t m = 0; m < adv.size(); ++m) adv[m] = rr[i] + M.off[i][m] - rr[j] - M.off[j][m];
         return seriesProb(adv, bo);
     }
-    // prob. de `a` vencer (considera resultados forçados)
+    // prob. de `a` vencer `b` (a começa o veto), considerando resultados forçados
     double probFor(int a, int b, int bo) const {
         auto it = M.forced.find({std::min(a, b), std::max(a, b)});
         if (it != M.forced.end()) return it->second == a ? 1.0 : 0.0;
-        int lo = std::min(a, b), hi = std::max(a, b);
-        double p = prob(lo, hi, bo);  // melhor seed começa o veto
-        return a == lo ? p : 1 - p;
+        return prob(a, b, bo);
     }
     int play(int a, int b, int bo) { return uni(rng) < probFor(a, b, bo) ? a : b; }
 
-    // Swiss 16 times. Categoria: 0=3-0 1=3-1 2=3-2 3=2-3 4=1-3 5=0-3
-    void swiss(const std::string& boRule, uint8_t* outCat) {
-        const int N = 16;
-        int W[N] = {0}, L[N] = {0};
+    // Swiss em posições locais (posição = seed-1). Devolve vitórias, derrotas e Buchholz.
+    void swiss(const std::vector<int>& slots, const std::map<std::pair<int, int>, std::vector<FixedMatch>>& fixed,
+               const std::string& boRule, std::vector<int>& W, std::vector<int>& L, std::vector<int>& B) {
+        const int N = static_cast<int>(slots.size());
+        W.assign(N, 0);
+        L.assign(N, 0);
+        B.assign(N, 0);
         std::vector<std::vector<int>> opp(N);
+        auto posOf = [&](int g) {
+            for (int i = 0; i < N; ++i)
+                if (slots[i] == g) return i;
+            return -1;
+        };
         auto bo = [&](int w, int l) {
             if (boRule == "bo1") return 1;
             if (boRule == "bo3") return 3;
             return (w == 2 || l == 2) ? 3 : 1;  // regra Valve
         };
-        auto playPair = [&](int a, int b) {
-            int win = play(a, b, bo(W[a], L[a]));
+        auto playPair = [&](int a, int b, int forcedWinner) {
+            if (a > b) std::swap(a, b);  // melhor seed começa o veto
+            int win;
+            if (forcedWinner == a || forcedWinner == b) win = forcedWinner;
+            else win = play(slots[a], slots[b], bo(W[a], L[a])) == slots[a] ? a : b;
             int los = win == a ? b : a;
             W[win]++;
             L[los]++;
             opp[a].push_back(b);
             opp[b].push_back(a);
         };
-        for (int i = 0; i < 8; ++i) playPair(i, i + 8);  // rodada 1: 1x9, 2x10...
-        for (int round = 2; round <= 5; ++round) {
+        for (int round = 1; round <= 5; ++round) {
             std::map<std::pair<int, int>, std::vector<int>> groups;
             for (int i = 0; i < N; ++i)
                 if (W[i] < 3 && L[i] < 3) groups[{W[i], L[i]}].push_back(i);
-            int buch[N] = {0};
+            if (groups.empty()) break;
+            std::vector<int> buch(N, 0);
             for (int i = 0; i < N; ++i)
                 for (int o : opp[i]) buch[i] += W[o] - L[o];
-            std::vector<std::pair<int, int>> matches;
+            std::vector<std::array<int, 3>> games;
             for (auto& g : groups) {
-                auto v = g.second;
-                std::sort(v.begin(), v.end(), [&](int a, int b) {
-                    return buch[a] != buch[b] ? buch[a] > buch[b] : a < b;
-                });
-                std::vector<std::pair<int, int>> pairs;
-                if (!pairUp(v, opp, false, pairs)) {
-                    pairs.clear();
-                    pairUp(v, opp, true, pairs);
+                std::vector<int> v = g.second;
+                // jogos reais (já jogados ou agendados) desta campanha
+                auto fit = fixed.find(g.first);
+                if (fit != fixed.end()) {
+                    for (const auto& fm : fit->second) {
+                        int pa = posOf(fm.a), pb = posOf(fm.b);
+                        if (pa < 0 || pb < 0) continue;
+                        if (std::find(v.begin(), v.end(), pa) == v.end() || std::find(v.begin(), v.end(), pb) == v.end()) continue;
+                        games.push_back({pa, pb, fm.winner >= 0 ? posOf(fm.winner) : -1});
+                        v.erase(std::find(v.begin(), v.end(), pa));
+                        v.erase(std::find(v.begin(), v.end(), pb));
+                    }
                 }
-                matches.insert(matches.end(), pairs.begin(), pairs.end());
+                if (v.size() < 2) continue;
+                std::vector<std::pair<int, int>> pairs;
+                if (g.first.first == 0 && g.first.second == 0) {
+                    // 1ª rodada: seed i x seed i + n/2 (1x9, 2x10, ...)
+                    std::sort(v.begin(), v.end());
+                    size_t h = v.size() / 2;
+                    for (size_t k = 0; k < h; ++k) pairs.push_back({v[k], v[k + h]});
+                } else {
+                    std::sort(v.begin(), v.end(), [&](int a, int b) {
+                        return buch[a] != buch[b] ? buch[a] > buch[b] : a < b;
+                    });
+                    if (!pairUp(v, opp, false, pairs)) {
+                        pairs.clear();
+                        pairUp(v, opp, true, pairs);
+                    }
+                }
+                for (auto& p : pairs) games.push_back({p.first, p.second, -1});
             }
-            for (auto& m : matches) playPair(m.first, m.second);
+            for (auto& gm : games) playPair(gm[0], gm[1], gm[2]);
         }
-        for (int i = 0; i < N; ++i) outCat[i] = static_cast<uint8_t>(W[i] == 3 ? L[i] : 5 - W[i]);
+        for (int i = 0; i < N; ++i)
+            for (int o : opp[i]) B[i] += W[o] - L[o];
+    }
+
+    // reach[pos]: 0 = caiu nas quartas, 1 = semi, 2 = final, 3 = campeão
+    void playoffs(const std::vector<int>& slots, const std::vector<std::pair<int, int>>& qf, int finalBo, int* reach) {
+        for (int i = 0; i < 8; ++i) reach[i] = 0;
+        auto duel = [&](int a, int b, int bo) {
+            return play(slots[a], slots[b], bo) == slots[a] ? a : b;
+        };
+        int w[4];
+        for (int q = 0; q < 4; ++q) {
+            w[q] = duel(qf[q].first, qf[q].second, 3);
+            reach[w[q]] = 1;
+        }
+        int f1 = duel(std::min(w[0], w[1]), std::max(w[0], w[1]), 3);
+        int f2 = duel(std::min(w[2], w[3]), std::max(w[2], w[3]), 3);
+        reach[f1] = 2;
+        reach[f2] = 2;
+        reach[duel(std::min(f1, f2), std::max(f1, f2), finalBo)] = 3;
+    }
+
+    // Simula a cadeia de estágios: vagas TBD de um estágio recebem os classificados
+    // do anterior (ordenados por campanha, Buchholz e seed). Para o último estágio
+    // grava a categoria de cada time (swiss 0..5, playoffs 0..3) e a posição ocupada.
+    void chain(const std::vector<ChainStage>& stages, const std::string& boRule, int finalBo, uint8_t* cat,
+               int8_t* slotOf) {
+        std::vector<int> carry, W, L, B;
+        for (size_t si = 0; si < stages.size(); ++si) {
+            const ChainStage& cs = stages[si];
+            std::vector<int> slots = cs.slots;
+            std::vector<int> incoming;
+            for (int t : carry)
+                if (std::find(slots.begin(), slots.end(), t) == slots.end()) incoming.push_back(t);
+            size_t k = 0;
+            for (auto& s : slots)
+                if (s < 0 && k < incoming.size()) s = incoming[k++];
+            for (int s : slots)
+                if (s < 0)
+                    throw std::runtime_error("o estagio '" + cs.name +
+                                             "' tem vagas sem time e o estagio anterior nao preenche todas");
+            bool last = si + 1 == stages.size();
+            if (cs.swiss) {
+                swiss(slots, cs.fixed, boRule, W, L, B);
+                std::vector<int> adv;
+                for (int i = 0; i < static_cast<int>(slots.size()); ++i)
+                    if (W[i] == 3) adv.push_back(i);
+                std::sort(adv.begin(), adv.end(), [&](int a, int b) {
+                    if (L[a] != L[b]) return L[a] < L[b];
+                    if (B[a] != B[b]) return B[a] > B[b];
+                    return a < b;
+                });
+                carry.clear();
+                for (int i : adv) carry.push_back(slots[i]);
+                if (last)
+                    for (int i = 0; i < static_cast<int>(slots.size()); ++i)
+                        cat[slots[i]] = static_cast<uint8_t>(W[i] == 3 ? L[i] : 5 - W[i]);
+            } else {
+                int reach[8];
+                playoffs(slots, cs.qf, finalBo, reach);
+                if (last)
+                    for (int i = 0; i < 8; ++i) cat[slots[i]] = static_cast<uint8_t>(reach[i]);
+            }
+            if (last)
+                for (int i = 0; i < static_cast<int>(slots.size()); ++i) slotOf[slots[i]] = static_cast<int8_t>(i);
+        }
     }
 
     const SimModel& M;
@@ -402,7 +511,7 @@ public:
     std::vector<double> rr;
 };
 
-// ---------------------------------------------------------------- Pick'Em
+// ---------------------------------------------------------------- Pick'Em (Swiss)
 using Picks = std::array<int, 10>;  // [0,1]=3-0 [2,3]=0-3 [4..9]=avança
 int slotType(int s) { return s < 2 ? 0 : (s < 4 ? 1 : 2); }
 
@@ -412,10 +521,11 @@ bool hit(int ty, uint8_t c, bool adv30) {
     return c == 1 || c == 2 || (adv30 && c == 0);
 }
 
-void evalPicks(const Picks& pk, const std::vector<uint8_t>& cats, size_t n, bool adv30, double& p5, double& eh) {
+void evalPicks(const Picks& pk, const std::vector<uint8_t>& cats, size_t nt, size_t n, bool adv30, double& p5,
+               double& eh) {
     size_t ok = 0, hits = 0;
     for (size_t s = 0; s < n; ++s) {
-        const uint8_t* c = &cats[s * 16];
+        const uint8_t* c = &cats[s * nt];
         int h = 0;
         for (int k = 0; k < 10; ++k) h += hit(slotType(k), c[pk[k]], adv30);
         hits += h;
@@ -425,35 +535,37 @@ void evalPicks(const Picks& pk, const std::vector<uint8_t>& cats, size_t n, bool
     eh = static_cast<double>(hits) / n;
 }
 
-Picks optimizePicks(const std::vector<std::array<double, 6>>& dist, const std::vector<uint8_t>& cats, size_t nSims,
-                    bool adv30) {
+double pickProb(const std::array<double, 6>& d, int ty, bool adv30) {
+    return ty == 0 ? d[0] : ty == 1 ? d[5] : d[1] + d[2] + (adv30 ? d[0] : 0);
+}
+
+Picks optimizePicks(const std::vector<std::array<double, 6>>& dist, const std::vector<int>& cand,
+                    const std::vector<uint8_t>& cats, size_t nt, size_t nSims, bool adv30) {
     Picks pk{};
-    std::vector<bool> used(16, false);
-    auto takeBest = [&](int ty) {
+    std::set<int> used;
+    for (int k = 0; k < 10; ++k) {
         int b = -1;
         double bp = -1;
-        for (int i = 0; i < 16; ++i) {
-            if (used[i]) continue;
-            double p = ty == 0 ? dist[i][0] : ty == 1 ? dist[i][5] : dist[i][1] + dist[i][2] + (adv30 ? dist[i][0] : 0);
-            if (p > bp) { bp = p; b = i; }
+        for (int t : cand) {
+            if (used.count(t)) continue;
+            double p = pickProb(dist[t], slotType(k), adv30);
+            if (p > bp) { bp = p; b = t; }
         }
-        used[b] = true;
-        return b;
-    };
-    for (int k = 0; k < 10; ++k) pk[k] = takeBest(slotType(k));
-
+        pk[k] = b;
+        used.insert(b);
+    }
     size_t n = std::min<size_t>(nSims, 40000);
     auto score = [&](const Picks& p) {
         double a, b;
-        evalPicks(p, cats, n, adv30, a, b);
-        return a + 1e-4 * b;
+        evalPicks(p, cats, nt, n, adv30, a, b);
+        return a + 1e-4 * b;  // prioriza P(>=5), desempata por acertos esperados
     };
     double best = score(pk);
     bool improved = true;
     while (improved) {
         improved = false;
         for (int k = 0; k < 10; ++k)
-            for (int t = 0; t < 16; ++t) {
+            for (int t : cand) {
                 if (std::find(pk.begin(), pk.end(), t) != pk.end()) continue;
                 Picks c = pk;
                 c[k] = t;
@@ -481,59 +593,11 @@ double numOr(const json& j, const char* key, double def = 0) {
     return def;
 }
 
-}  // namespace
-
-// ============================================================================
-// Previsão do evento
-// ============================================================================
-json predictEvent(const Engine& trained, const Dataset& data, const json& req) {
-    Engine eng = trained;  // cópia: não altera o estado compartilhado
+// Força de cada time do universo (Elo + prior HLTV + jogadores + cenário) e
+// informações exibidas no site.
+void buildTeams(Engine& eng, const Dataset& data, const std::vector<std::string>& names, const json& sc,
+                const std::vector<std::string>& pool, SimModel& M, json& teamsJ, json& warnings) {
     const Params& P = eng.P;
-
-    std::string format = util::lower(strOr(req, "format", "swiss"));
-    if (format != "swiss" && format != "playoffs") throw std::runtime_error("format deve ser 'swiss' ou 'playoffs'");
-    size_t need = format == "playoffs" ? 8 : 16;
-    std::string boRule = util::lower(strOr(req, "boRule", "valve"));
-    int finalBo = static_cast<int>(numOr(req, "finalBo", 3));
-    if (finalBo != 1 && finalBo != 3 && finalBo != 5) finalBo = 3;
-    bool adv30 = req.contains("advIncludes30") && req["advIncludes30"].is_boolean() && req["advIncludes30"].get<bool>();
-    int sims = std::clamp(static_cast<int>(numOr(req, "sims", P.sims)), 1000, 200000);
-    uint64_t seed = (req.contains("seed") && req["seed"].is_number_unsigned()) ? req["seed"].get<uint64_t>()
-                                                                               : static_cast<uint64_t>(std::random_device{}());
-
-    std::vector<std::string> pool;
-    if (req.contains("pool") && req["pool"].is_array())
-        for (auto& x : req["pool"])
-            if (x.is_string()) {
-                std::string k = mapKey(x.get<std::string>());
-                if (!k.empty() && std::find(pool.begin(), pool.end(), k) == pool.end()) pool.push_back(k);
-            }
-    if (pool.empty()) pool = DEFAULT_POOL;
-    if (pool.size() < 5) throw std::runtime_error("o map pool precisa de pelo menos 5 mapas");
-
-    // ---- times
-    struct In { std::string name; int seed; };
-    std::vector<In> in;
-    if (!req.contains("teams") || !req["teams"].is_array()) throw std::runtime_error("campo 'teams' ausente");
-    int idx = 0;
-    for (auto& t : req["teams"]) {
-        ++idx;
-        if (t.is_string()) in.push_back({util::trim(t.get<std::string>()), idx});
-        else if (t.is_object()) in.push_back({util::trim(strOr(t, "name")), static_cast<int>(numOr(t, "seed", idx))});
-    }
-    std::stable_sort(in.begin(), in.end(), [](const In& a, const In& b) { return a.seed < b.seed; });
-    if (in.size() != need)
-        throw std::runtime_error("o formato " + format + " precisa de " + std::to_string(need) + " times (recebi " +
-                                 std::to_string(in.size()) + ")");
-    std::set<std::string> keys;
-    for (auto& t : in) {
-        std::string k = teamKey(t.name);
-        if (k.empty()) throw std::runtime_error("nome de time vazio");
-        if (!keys.insert(k).second) throw std::runtime_error("time repetido: " + t.name);
-    }
-
-    // ---- cenário
-    json sc = (req.contains("scenario") && req["scenario"].is_object()) ? req["scenario"] : json::object();
     std::map<std::string, double> adjust;
     if (sc.contains("adjust") && sc["adjust"].is_array())
         for (auto& a : sc["adjust"]) adjust[teamKey(strOr(a, "team"))] += numOr(a, "delta");
@@ -556,13 +620,13 @@ json predictEvent(const Engine& trained, const Dataset& data, const json& req) {
     for (auto& p : data.players) curPlayers[playerKey(p.name)] = &p;
 
     int day = std::max(util::todayDay(), eng.lastDay);
-    size_t n = in.size();
+    size_t n = names.size();
     std::vector<TeamState> st(n);
     std::vector<double> points(n, 0);
     double meanElo = 0, meanLn = 0;
     int withPts = 0;
     for (size_t i = 0; i < n; ++i) {
-        std::string k = teamKey(in[i].name);
+        std::string k = teamKey(names[i]);
         auto it = eng.T.find(k);
         if (it != eng.T.end()) st[i] = it->second;
         eng.decayTo(st[i], day);
@@ -574,18 +638,15 @@ json predictEvent(const Engine& trained, const Dataset& data, const json& req) {
             ++withPts;
         }
     }
-    meanElo /= static_cast<double>(n);
+    meanElo /= std::max<double>(1, static_cast<double>(n));
     if (withPts) meanLn /= withPts;
 
-    SimModel M;
-    json teamsJ = json::array();
-    json warnings = json::array();
-    std::vector<std::string> names(n);
+    teamsJ = json::array();
     for (size_t i = 0; i < n; ++i) {
-        std::string k = teamKey(in[i].name);
+        std::string k = teamKey(names[i]);
         const TeamState& s = st[i];
         auto rk = rankMap.find(k);
-        names[i] = rk != rankMap.end() ? rk->second->name : (!s.display.empty() ? s.display : in[i].name);
+        std::string display = rk != rankMap.end() ? rk->second->name : names[i];
 
         double base = s.r, prior = 0, w = 0;
         bool hasPrior = points[i] > 0;
@@ -636,10 +697,10 @@ json predictEvent(const Engine& trained, const Dataset& data, const json& req) {
         M.r.push_back(rating);
         M.sigma.push_back(P.sigmaFloor + P.sigmaNew * 30.0 / (30.0 + s.n));
         M.off.push_back(offs);
-        if (s.n < 10) warnings.push_back(names[i] + ": poucos mapas no historico (" + std::to_string(static_cast<int>(s.n)) + ")");
+        if (s.n < 10)
+            warnings.push_back(display + ": poucos mapas no historico (" + std::to_string(static_cast<int>(s.n)) + ")");
 
-        teamsJ.push_back({{"name", names[i]},
-                          {"seed", i + 1},
+        teamsJ.push_back({{"name", display},
                           {"rating", rating},
                           {"elo", s.r},
                           {"prior", hasPrior ? json(prior) : json(nullptr)},
@@ -654,17 +715,237 @@ json predictEvent(const Engine& trained, const Dataset& data, const json& req) {
                           {"jogadores", pj},
                           {"mapas", mapsJ}});
     }
+}
 
+const char* stageStatus(const StageInfo& s, int& known, int& played, int& pending) {
+    known = 0;
+    played = 0;
+    pending = 0;
+    for (auto& t : s.teams)
+        if (!t.name.empty()) ++known;
+    for (auto& m : s.matches) {
+        if (m.a.empty() || m.b.empty()) continue;
+        if (!m.winner.empty()) ++played; else ++pending;
+    }
+    int total = s.type == "playoffs" ? 7 : 33;
+    if (played >= total) return "terminado";
+    if (played > 0 || pending > 0) return "em andamento";
+    if (known < s.size) return "aguardando times";
+    return "nao comecou";
+}
+
+}  // namespace
+
+// ============================================================================
+// Eventos (Majors) disponíveis
+// ============================================================================
+json eventsSummary(const Dataset& data) {
+    json out = json::array();
+    for (auto& ev : data.events) {
+        json stages = json::array();
+        for (size_t i = 0; i < ev.stages.size(); ++i) {
+            const StageInfo& s = ev.stages[i];
+            int known, played, pending;
+            const char* status = stageStatus(s, known, played, pending);
+            stages.push_back({{"index", i},
+                              {"name", s.name},
+                              {"eventName", s.eventName},
+                              {"type", s.type},
+                              {"size", s.size},
+                              {"conhecidos", known},
+                              {"jogados", played},
+                              {"pendentes", pending},
+                              {"status", status},
+                              {"teams", s.teams},
+                              {"matches", s.matches},
+                              {"qfSeeds", s.qfSeeds}});
+        }
+        out.push_back({{"name", ev.name}, {"eventId", ev.eventId}, {"updatedAt", ev.updatedAt}, {"pool", ev.pool},
+                       {"stages", stages}});
+    }
+    return out;
+}
+
+// ============================================================================
+// Previsão: estágio de um evento real ou lista manual de times
+// ============================================================================
+json predictEvent(const Engine& trained, const Dataset& data, const json& req) {
+    Engine eng = trained;  // cópia: não altera o estado compartilhado
+    const Params& P = eng.P;
+
+    std::string boRule = util::lower(strOr(req, "boRule", "valve"));
+    int finalBo = static_cast<int>(numOr(req, "finalBo", 3));
+    if (finalBo != 1 && finalBo != 3 && finalBo != 5) finalBo = 3;
+    bool adv30 = req.contains("advIncludes30") && req["advIncludes30"].is_boolean() && req["advIncludes30"].get<bool>();
+    int sims = std::clamp(static_cast<int>(numOr(req, "sims", P.sims)), 1000, 200000);
+    uint64_t seed = (req.contains("seed") && req["seed"].is_number_unsigned()) ? req["seed"].get<uint64_t>()
+                                                                               : static_cast<uint64_t>(std::random_device{}());
+    json sc = (req.contains("scenario") && req["scenario"].is_object()) ? req["scenario"] : json::object();
+
+    // universo de times (todos os estágios da cadeia)
+    std::vector<std::string> names;
+    std::map<std::string, int> index;
+    auto idOf = [&](const std::string& n) -> int {
+        std::string k = teamKey(n);
+        if (k.empty()) throw std::runtime_error("nome de time vazio");
+        auto it = index.find(k);
+        if (it != index.end()) return it->second;
+        int id = static_cast<int>(names.size());
+        index[k] = id;
+        names.push_back(n);
+        return id;
+    };
+
+    std::vector<ChainStage> chain;
+    std::vector<std::array<int, 3>> knownResults;  // playoffs: a, b, vencedor
+    std::map<int, int> targetSeed;                 // time -> seed no estágio alvo
+    std::vector<std::string> poolRaw;
+    json out = json::object();
+
+    std::string eventName = strOr(req, "event");
+    if (!eventName.empty()) {
+        // ---------------- estágio de um evento real
+        const EventInfo* ev = nullptr;
+        for (auto& e : data.events)
+            if (e.name == eventName) ev = &e;
+        if (!ev) throw std::runtime_error("evento nao encontrado: " + eventName);
+        int target = static_cast<int>(numOr(req, "stage", 0));
+        if (target < 0 || target >= static_cast<int>(ev->stages.size())) throw std::runtime_error("estagio invalido");
+        auto knownCount = [](const StageInfo& s) {
+            int c = 0;
+            for (auto& t : s.teams)
+                if (!t.name.empty()) ++c;
+            return c;
+        };
+        int start = target;
+        while (start > 0 && knownCount(ev->stages[start]) < ev->stages[start].size) --start;
+        if (knownCount(ev->stages[start]) < ev->stages[start].size)
+            throw std::runtime_error("o estagio '" + ev->stages[start].name +
+                                     "' ainda nao tem todos os times e nao ha estagio anterior para completar");
+
+        for (int si = start; si <= target; ++si) {
+            const StageInfo& st = ev->stages[si];
+            ChainStage cs;
+            cs.name = st.name;
+            cs.swiss = st.type != "playoffs";
+            if (cs.swiss) {
+                cs.slots.assign(st.size, -1);
+                std::vector<int> noSeed;
+                for (auto& t : st.teams) {
+                    if (t.name.empty()) continue;
+                    int id = idOf(t.name);
+                    if (t.seed >= 1 && t.seed <= st.size && cs.slots[t.seed - 1] < 0) cs.slots[t.seed - 1] = id;
+                    else noSeed.push_back(id);
+                }
+                for (int id : noSeed)
+                    for (auto& s : cs.slots)
+                        if (s < 0) { s = id; break; }
+                for (auto& m : st.matches) {
+                    if (m.a.empty() || m.b.empty()) continue;
+                    int a = idOf(m.a), b = idOf(m.b);
+                    int w = m.winner.empty() ? -1 : idOf(m.winner);
+                    cs.fixed[{m.w, m.l}].push_back({a, b, w});
+                }
+            } else {
+                std::vector<const StageMatch*> qfm;
+                for (auto& m : st.matches)
+                    if (m.round == 1) qfm.push_back(&m);
+                bool known = qfm.size() == 4;
+                for (auto* m : qfm)
+                    if (m->a.empty() || m->b.empty()) known = false;
+                if (known) {
+                    for (auto* m : qfm) {
+                        cs.slots.push_back(idOf(m->a));
+                        cs.slots.push_back(idOf(m->b));
+                    }
+                    cs.qf = {{0, 1}, {2, 3}, {4, 5}, {6, 7}};
+                } else {
+                    cs.slots.assign(8, -1);
+                    for (auto& q : st.qfSeeds)
+                        if (q.size() == 2 && q[0] >= 1 && q[0] <= 8 && q[1] >= 1 && q[1] <= 8)
+                            cs.qf.push_back({q[0] - 1, q[1] - 1});
+                    if (cs.qf.size() != 4) cs.qf = {{0, 7}, {3, 4}, {1, 6}, {2, 5}};
+                }
+                for (auto& m : st.matches)
+                    if (!m.winner.empty() && !m.a.empty() && !m.b.empty())
+                        knownResults.push_back({idOf(m.a), idOf(m.b), idOf(m.winner)});
+            }
+            cs.slotsKnown = std::find(cs.slots.begin(), cs.slots.end(), -1) == cs.slots.end();
+            chain.push_back(cs);
+        }
+        const StageInfo& tg = ev->stages[target];
+        for (auto& t : tg.teams)
+            if (!t.name.empty()) targetSeed[idOf(t.name)] = t.seed;
+        if (req.contains("pool") && req["pool"].is_array() && !req["pool"].empty()) {
+            for (auto& x : req["pool"])
+                if (x.is_string()) poolRaw.push_back(x.get<std::string>());
+        } else {
+            poolRaw = ev->pool;
+        }
+        json chainJ = json::array();
+        for (auto& c : chain) chainJ.push_back(c.name);
+        out["modo"] = "evento";
+        out["evento"] = ev->name;
+        out["estagio"] = tg.name;
+        out["cadeia"] = chainJ;
+    } else {
+        // ---------------- lista manual
+        std::string format = util::lower(strOr(req, "format", "swiss"));
+        if (format != "swiss" && format != "playoffs") throw std::runtime_error("format deve ser 'swiss' ou 'playoffs'");
+        size_t need = format == "playoffs" ? 8 : 16;
+        struct In { std::string name; int seed; };
+        std::vector<In> in;
+        if (!req.contains("teams") || !req["teams"].is_array()) throw std::runtime_error("campo 'teams' ausente");
+        int idx = 0;
+        for (auto& t : req["teams"]) {
+            ++idx;
+            if (t.is_string()) in.push_back({util::trim(t.get<std::string>()), idx});
+            else if (t.is_object()) in.push_back({util::trim(strOr(t, "name")), static_cast<int>(numOr(t, "seed", idx))});
+        }
+        std::stable_sort(in.begin(), in.end(), [](const In& a, const In& b) { return a.seed < b.seed; });
+        if (in.size() != need)
+            throw std::runtime_error("o formato " + format + " precisa de " + std::to_string(need) + " times (recebi " +
+                                     std::to_string(in.size()) + ")");
+        ChainStage cs;
+        cs.name = "Personalizado";
+        cs.swiss = format == "swiss";
+        for (size_t i = 0; i < in.size(); ++i) {
+            int before = static_cast<int>(names.size());
+            int id = idOf(in[i].name);
+            if (id < before) throw std::runtime_error("time repetido: " + in[i].name);
+            cs.slots.push_back(id);
+            targetSeed[id] = static_cast<int>(i) + 1;
+        }
+        if (!cs.swiss) cs.qf = {{0, 7}, {3, 4}, {1, 6}, {2, 5}};
+        chain.push_back(cs);
+        if (req.contains("pool") && req["pool"].is_array())
+            for (auto& x : req["pool"])
+                if (x.is_string()) poolRaw.push_back(x.get<std::string>());
+        out["modo"] = "manual";
+        out["cadeia"] = json::array({"Personalizado"});
+    }
+
+    // map pool
+    std::vector<std::string> pool;
+    for (auto& m : poolRaw) {
+        std::string k = mapKey(m);
+        if (!k.empty() && std::find(pool.begin(), pool.end(), k) == pool.end()) pool.push_back(k);
+    }
+    if (pool.empty()) pool = DEFAULT_POOL;
+    if (pool.size() < 5) throw std::runtime_error("o map pool precisa de pelo menos 5 mapas");
+
+    // força dos times
+    SimModel M;
+    json teamsJ, warnings = json::array();
+    buildTeams(eng, data, names, sc, pool, M, teamsJ, warnings);
+    for (auto& kr : knownResults) M.forced[{std::min(kr[0], kr[1]), std::max(kr[0], kr[1])}] = kr[2];
     if (sc.contains("force") && sc["force"].is_array())
         for (auto& f : sc["force"]) {
-            std::string a = teamKey(strOr(f, "a")), b = teamKey(strOr(f, "b")), wk = teamKey(strOr(f, "winner"));
-            int ia = -1, ib = -1, iw = -1;
-            for (size_t i = 0; i < n; ++i) {
-                std::string k = teamKey(in[i].name);
-                if (k == a) ia = static_cast<int>(i);
-                if (k == b) ib = static_cast<int>(i);
-                if (k == wk) iw = static_cast<int>(i);
-            }
+            auto look = [&](const std::string& n) {
+                auto it = index.find(teamKey(n));
+                return it == index.end() ? -1 : it->second;
+            };
+            int ia = look(strOr(f, "a")), ib = look(strOr(f, "b")), iw = look(strOr(f, "winner"));
             if (ia < 0 || ib < 0 || iw < 0 || ia == ib || (iw != ia && iw != ib)) {
                 warnings.push_back("Resultado forcado ignorado: " + strOr(f, "a") + " x " + strOr(f, "b"));
                 continue;
@@ -672,72 +953,116 @@ json predictEvent(const Engine& trained, const Dataset& data, const json& req) {
             M.forced[{std::min(ia, ib), std::max(ia, ib)}] = iw;
         }
 
+    // ---------------- simulação
+    const size_t NT = names.size();
+    const bool playoffsTarget = !chain.back().swiss;
     Simulator sim(M, seed);
-    json out = {{"format", format}, {"sims", sims}, {"seed", seed}, {"pool", pool}, {"avisos", warnings}};
+    std::vector<uint8_t> cats(static_cast<size_t>(sims) * NT, 255);
+    std::vector<std::vector<int>> slotCount(8, std::vector<int>(NT, 0));
+    std::vector<int8_t> slotOf(NT, -1);
+    for (int s = 0; s < sims; ++s) {
+        sim.drawRatings();
+        std::fill(slotOf.begin(), slotOf.end(), static_cast<int8_t>(-1));
+        sim.chain(chain, boRule, finalBo, &cats[static_cast<size_t>(s) * NT], slotOf.data());
+        if (playoffsTarget)
+            for (size_t t = 0; t < NT; ++t)
+                if (slotOf[t] >= 0 && slotOf[t] < 8) slotCount[slotOf[t]][t]++;
+    }
 
-    if (format == "playoffs") {
-        const int qf[4][2] = {{0, 7}, {3, 4}, {1, 6}, {2, 5}};
-        std::vector<double> pSF(8, 0), pF(8, 0), pW(8, 0);
-        for (int s = 0; s < sims; ++s) {
-            sim.drawRatings();
-            int w[4];
-            for (int q = 0; q < 4; ++q) { w[q] = sim.play(qf[q][0], qf[q][1], 3); pSF[w[q]] += 1; }
-            int f1 = sim.play(w[0], w[1], 3), f2 = sim.play(w[2], w[3], 3);
-            pF[f1] += 1;
-            pF[f2] += 1;
-            pW[sim.play(f1, f2, finalBo)] += 1;
+    std::vector<double> part(NT, 0);
+    std::vector<std::array<double, 6>> dist(NT, std::array<double, 6>{0, 0, 0, 0, 0, 0});
+    for (int s = 0; s < sims; ++s)
+        for (size_t t = 0; t < NT; ++t) {
+            uint8_t c = cats[static_cast<size_t>(s) * NT + t];
+            if (c == 255) continue;
+            part[t] += 1.0 / sims;
+            if (c < 6) dist[t][c] += 1.0 / sims;
         }
-        for (size_t i = 0; i < 8; ++i) {
-            teamsJ[i]["semi"] = pSF[i] / sims;
-            teamsJ[i]["final"] = pF[i] / sims;
-            teamsJ[i]["campeao"] = pW[i] / sims;
+
+    out["format"] = playoffsTarget ? "playoffs" : "swiss";
+    out["sims"] = sims;
+    out["seed"] = seed;
+    out["pool"] = pool;
+    out["avisos"] = warnings;
+
+    json teamsOut = json::array();
+    std::vector<int> cand;
+    for (size_t t = 0; t < NT; ++t) {
+        if (part[t] <= 0) continue;
+        cand.push_back(static_cast<int>(t));
+        json tj = teamsJ[t];
+        tj["participa"] = part[t];
+        tj["seed"] = targetSeed.count(static_cast<int>(t)) ? json(targetSeed[static_cast<int>(t)]) : json(nullptr);
+        tj["id"] = t;
+        if (playoffsTarget) {
+            tj["quartas"] = part[t];
+            tj["semi"] = dist[t][1] + dist[t][2] + dist[t][3];
+            tj["final"] = dist[t][2] + dist[t][3];
+            tj["campeao"] = dist[t][3];
+        } else {
+            static const char* labels[6] = {"3-0", "3-1", "3-2", "2-3", "1-3", "0-3"};
+            json d = json::object();
+            for (int c = 0; c < 6; ++c) d[labels[c]] = dist[t][c];
+            tj["dist"] = d;
+            tj["avanca"] = dist[t][0] + dist[t][1] + dist[t][2];
         }
+        teamsOut.push_back(tj);
+    }
+    out["teams"] = teamsOut;
+
+    if (playoffsTarget) {
+        // chave: times conhecidos ou, se ainda TBD, o ocupante mais provável de cada posição
+        const ChainStage& cs = chain.back();
+        std::vector<int> occ(8, -1);
+        std::vector<double> occP(8, 1.0);
+        if (cs.slotsKnown) {
+            occ = cs.slots;
+        } else {
+            std::set<int> usedT;
+            for (int pos = 0; pos < 8; ++pos) {
+                int best = -1;
+                for (size_t t = 0; t < NT; ++t)
+                    if (!usedT.count(static_cast<int>(t)) && (best < 0 || slotCount[pos][t] > slotCount[pos][best]))
+                        best = static_cast<int>(t);
+                occ[pos] = best;
+                occP[pos] = best >= 0 ? static_cast<double>(slotCount[pos][best]) / sims : 0;
+                usedT.insert(best);
+            }
+        }
+        for (int o : occ)
+            if (o < 0) throw std::runtime_error("nao ha times suficientes para montar a chave");
         sim.meanRatings();
         json bracket = json::array();
         auto pick = [&](int a, int b, int bo, const char* stage) {
             double p = sim.probFor(a, b, bo);
             int w = p >= 0.5 ? a : b;
-            bracket.push_back({{"fase", stage}, {"a", names[a]}, {"b", names[b]}, {"vencedor", names[w]},
-                               {"prob", std::max(p, 1 - p)}});
+            bracket.push_back({{"fase", stage}, {"a", teamsJ[a]["name"]}, {"b", teamsJ[b]["name"]},
+                               {"vencedor", teamsJ[w]["name"]}, {"prob", std::max(p, 1 - p)}});
             return w;
         };
         int w[4];
-        for (int q = 0; q < 4; ++q) w[q] = pick(qf[q][0], qf[q][1], 3, "Quartas");
+        for (int q = 0; q < 4; ++q) w[q] = pick(occ[cs.qf[q].first], occ[cs.qf[q].second], 3, "Quartas");
         int f1 = pick(w[0], w[1], 3, "Semi"), f2 = pick(w[2], w[3], 3, "Semi");
         pick(f1, f2, finalBo, "Final");
-        out["teams"] = teamsJ;
         out["chave"] = bracket;
+        out["chaveDefinida"] = cs.slotsKnown;
+        json occJ = json::array();
+        for (int pos = 0; pos < 8; ++pos) occJ.push_back({{"pos", pos + 1}, {"team", teamsJ[occ[pos]]["name"]}, {"prob", occP[pos]}});
+        out["ocupantes"] = occJ;
         return out;
     }
 
-    // ---- Swiss
-    std::vector<uint8_t> cats(static_cast<size_t>(sims) * 16);
-    for (int s = 0; s < sims; ++s) {
-        sim.drawRatings();
-        sim.swiss(boRule, &cats[static_cast<size_t>(s) * 16]);
-    }
-    std::vector<std::array<double, 6>> dist(16, std::array<double, 6>{0, 0, 0, 0, 0, 0});
-    for (int s = 0; s < sims; ++s)
-        for (int i = 0; i < 16; ++i) dist[i][cats[static_cast<size_t>(s) * 16 + i]] += 1.0 / sims;
-    Picks pk = optimizePicks(dist, cats, static_cast<size_t>(sims), adv30);
+    // ---------------- Pick'Em do Swiss
+    if (cand.size() < 10) throw std::runtime_error("menos de 10 times possiveis no estagio");
+    Picks pk = optimizePicks(dist, cand, cats, NT, static_cast<size_t>(sims), adv30);
     double p5, eh;
-    evalPicks(pk, cats, static_cast<size_t>(sims), adv30, p5, eh);
-
-    static const char* labels[6] = {"3-0", "3-1", "3-2", "2-3", "1-3", "0-3"};
-    for (int i = 0; i < 16; ++i) {
-        json d = json::object();
-        for (int c = 0; c < 6; ++c) d[labels[c]] = dist[i][c];
-        teamsJ[i]["dist"] = d;
-        teamsJ[i]["avanca"] = dist[i][0] + dist[i][1] + dist[i][2];
-    }
+    evalPicks(pk, cats, NT, static_cast<size_t>(sims), adv30, p5, eh);
     json picks = {{"3-0", json::array()}, {"0-3", json::array()}, {"avanca", json::array()}};
     for (int k = 0; k < 10; ++k) {
         int t = pk[k], ty = slotType(k);
-        double p = ty == 0 ? dist[t][0] : ty == 1 ? dist[t][5] : dist[t][1] + dist[t][2] + (adv30 ? dist[t][0] : 0);
         const char* key = ty == 0 ? "3-0" : ty == 1 ? "0-3" : "avanca";
-        picks[key].push_back({{"team", names[t]}, {"prob", p}});
+        picks[key].push_back({{"team", teamsJ[t]["name"]}, {"prob", pickProb(dist[t], ty, adv30)}});
     }
-    out["teams"] = teamsJ;
     out["picks"] = picks;
     out["p5"] = p5;
     out["acertosEsperados"] = eh;

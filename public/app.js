@@ -8,7 +8,8 @@ const pct = (x, d = 1) => `${((x || 0) * 100).toFixed(d)}%`;
 const num = (x, d = 0) => (x == null || Number.isNaN(+x) ? '–' : (+x).toFixed(d));
 const signed = (x, d = 0) => (x > 0 ? '+' : '') + num(x, d);
 
-const ALL_MAPS = ['ancient', 'anubis', 'dust2', 'inferno', 'mirage', 'nuke', 'train', 'overpass', 'vertigo'];
+const ALL_MAPS = ['ancient', 'anubis', 'cache', 'dust2', 'inferno', 'mirage', 'nuke', 'overpass', 'train', 'vertigo'];
+const mapKey = (m) => { const k = String(m).toLowerCase().replace(/^de_/, '').replace(/[^a-z0-9]/g, ''); return k === 'dustii' ? 'dust2' : k; };
 const DEFAULT_POOL = ['ancient', 'anubis', 'dust2', 'inferno', 'mirage', 'nuke', 'train'];
 const BUSY = ['iniciando', 'coletando', 'curando', 'treinando'];
 
@@ -35,6 +36,11 @@ function showErr(sel, msg) { const el = $(sel); el.textContent = msg; el.hidden 
 
 // ============================================================ estado do formulário
 const state = {
+  mode: 'evento',        // 'evento' (Major real) | 'manual'
+  eventName: '',
+  stageIndex: null,
+  poolEvent: '',         // evento cujo map pool já foi aplicado
+  teamAdj: {},           // nome -> { adjust, lineup } (modo evento)
   format: 'swiss',
   rows: [],
   pool: [...DEFAULT_POOL],
@@ -68,7 +74,163 @@ function saveForm() {
 }
 
 const nTeams = () => (state.format === 'swiss' ? 16 : 8);
-const activeNames = () => state.rows.slice(0, nTeams()).map((r) => r.name.trim()).filter(Boolean);
+function activeNames() {
+  if (state.mode === 'evento') {
+    const ev = currentEvent();
+    if (!ev) return [];
+    const set = new Set();
+    ev.stages.forEach((s) => s.teams.forEach((t) => t.name && set.add(t.name)));
+    return [...set].sort((a, b) => a.localeCompare(b));
+  }
+  return state.rows.slice(0, nTeams()).map((r) => r.name.trim()).filter(Boolean);
+}
+
+// ============================================================ eventos (Majors)
+let events = [];
+const currentEvent = () => events.find((e) => e.name === state.eventName) || events[0] || null;
+const ROUND_BUCKETS = [[[0, 0]], [[1, 0], [0, 1]], [[2, 0], [1, 1], [0, 2]], [[2, 1], [1, 2]], [[2, 2]]];
+const statusCls = (s) => (s === 'terminado' ? 'done' : s === 'em andamento' ? 'live' : '');
+
+function defaultStage(ev) {
+  let i = ev.stages.findIndex((s) => s.status === 'em andamento');
+  if (i < 0) i = ev.stages.findIndex((s) => s.status !== 'terminado');
+  return i < 0 ? ev.stages.length - 1 : i;
+}
+
+async function loadEvents() {
+  try { events = await api('/api/events'); } catch { events = []; }
+  renderEvents();
+}
+
+function applyMode() {
+  const ev = state.mode === 'evento';
+  $$('#modeSeg button').forEach((b) => b.classList.toggle('on', b.dataset.mode === state.mode));
+  $('#eventPane').hidden = !ev;
+  $('#manualCard').hidden = ev;
+  $('#eventTeamsCard').hidden = !ev;
+  renderScenario();
+}
+$$('#modeSeg button').forEach((b) => b.addEventListener('click', () => {
+  state.mode = b.dataset.mode;
+  saveForm();
+  applyMode();
+  if (state.mode === 'evento') renderEvents();
+}));
+$('#eventSelect').addEventListener('change', (e) => {
+  state.eventName = e.target.value;
+  state.stageIndex = null;
+  saveForm();
+  renderEvents();
+});
+
+function renderEvents() {
+  const sel = $('#eventSelect');
+  const ev = currentEvent();
+  if (!ev) {
+    sel.innerHTML = '<option>Nenhuma Major carregada</option>';
+    sel.disabled = true;
+    $('#eventHint').innerHTML = 'Envie a página de qualquer estágio da Major (<code>hltv.org/events/…</code>) pela extensão ou em <b>Dados → Importar manualmente</b>. Uma página traz todos os estágios.';
+    $('#stageCards').innerHTML = '';
+    $('#stageBoard').innerHTML = '';
+    $('#eventTeamRows').innerHTML = '';
+    return;
+  }
+  sel.disabled = false;
+  state.eventName = ev.name;
+  sel.innerHTML = events.map((e) => `<option value="${esc(e.name)}"${e.name === ev.name ? ' selected' : ''}>${esc(e.name)}</option>`).join('');
+  $('#eventHint').textContent = `${ev.stages.length} estágios · map pool: ${ev.pool.join(', ') || '–'} · atualizado ${ev.updatedAt || '–'}`;
+  if (state.poolEvent !== ev.name && ev.pool.length) {
+    state.pool = ev.pool.map(mapKey);
+    state.poolEvent = ev.name;
+    renderPool();
+  }
+  if (state.stageIndex == null || state.stageIndex >= ev.stages.length) state.stageIndex = defaultStage(ev);
+  $('#stageCards').innerHTML = ev.stages.map((s, i) => `
+    <button class="stage-card${i === state.stageIndex ? ' on' : ''}" data-i="${i}">
+      <span class="n">${esc(s.name)}</span>
+      <span class="s">${s.type === 'playoffs' ? 'Playoffs · 8 times' : 'Swiss · 16 times'} · ${s.conhecidos}/${s.size} definidos</span>
+      <span class="s"><span class="badge ${statusCls(s.status)}">${esc(s.status)}</span>${s.jogados ? ` ${s.jogados} jogos` : ''}${s.pendentes ? ` · ${s.pendentes} marcados` : ''}</span>
+    </button>`).join('');
+  $$('.stage-card').forEach((b) => b.addEventListener('click', () => {
+    state.stageIndex = Number(b.dataset.i);
+    saveForm();
+    renderEvents();
+  }));
+  renderStageBoard(ev, state.stageIndex);
+  saveForm();
+}
+
+function stageRecords(st) {
+  const rec = {};
+  st.teams.forEach((t) => { if (t.name) rec[t.name] = [0, 0]; });
+  st.matches.forEach((m) => {
+    if (!m.winner) return;
+    const los = m.winner === m.a ? m.b : m.a;
+    (rec[m.winner] = rec[m.winner] || [0, 0])[0]++;
+    (rec[los] = rec[los] || [0, 0])[1]++;
+  });
+  return rec;
+}
+
+function matchHtml(m) {
+  const cls = (n) => (!m.winner ? '' : m.winner === n ? 'w' : 'l');
+  const score = m.winner ? `${m.scoreA}-${m.scoreB}` : (m.ts ? new Date(m.ts).toLocaleString('pt-BR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) : 'a definir');
+  return `<div class="bm${m.winner ? '' : ' pending'}"><span><span class="${cls(m.a)}">${esc(m.a || 'TBD')}</span> × <span class="${cls(m.b)}">${esc(m.b || 'TBD')}</span></span><span class="sc">${esc(score)}</span></div>`;
+}
+
+function renderStageBoard(ev, idx) {
+  const st = ev.stages[idx];
+  const prev = idx > 0 ? ev.stages[idx - 1] : null;
+  const missing = st.size - st.conhecidos;
+  const note = missing > 0
+    ? `<p class="board-note">${missing} vaga(s) ainda sem time: a previsão simula ${prev ? `o <b>${esc(prev.name)}</b>${idx > 1 && ev.stages[idx - 1].conhecidos < ev.stages[idx - 1].size ? ' (e os anteriores)' : ''}` : 'os estágios anteriores'} para preencher com os classificados mais prováveis.</p>`
+    : '';
+  let board = '';
+  if (st.type === 'playoffs') {
+    const qf = st.matches.filter((m) => m.round === 1);
+    const known = qf.length === 4 && qf.every((m) => m.a && m.b);
+    board = known
+      ? `<h3>Chave</h3><div class="qf-list">${st.matches.filter((m) => m.a || m.b).map(matchHtml).join('')}</div>`
+      : `<h3>Chave por seed</h3><div class="qf-list">${(st.qfSeeds.length ? st.qfSeeds : [[1, 8], [4, 5], [2, 7], [3, 6]]).map((q) => `<div class="bm pending"><span>Seed ${q[0]} × Seed ${q[1]}</span><span class="sc">quartas</span></div>`).join('')}</div>`;
+  } else {
+    board = `<div class="swiss-board">${ROUND_BUCKETS.map((buckets, r) => `
+      <div class="sround"><h4>Rodada ${r + 1}</h4>${buckets.map(([w, l]) => {
+        const ms = st.matches.filter((m) => m.w === w && m.l === l);
+        return ms.length ? `<div class="bucket"><span class="bucket-t">${w}-${l}</span>${ms.map(matchHtml).join('')}</div>` : '';
+      }).join('') || '<span class="hint">—</span>'}</div>`).join('')}</div>`;
+  }
+  $('#stageBoard').innerHTML = board + note;
+  renderEventTeams(st);
+}
+
+function renderEventTeams(st) {
+  const rec = stageRecords(st);
+  const teams = [...st.teams].sort((a, b) => (a.seed || 99) - (b.seed || 99));
+  const box = $('#eventTeamRows');
+  box.innerHTML = '';
+  teams.forEach((t) => {
+    if (!t.name) return;
+    const adj = state.teamAdj[t.name] || (state.teamAdj[t.name] = { adjust: '', lineup: '' });
+    const r = rec[t.name] || [0, 0];
+    const div = document.createElement('div');
+    div.className = 'ev-row';
+    div.innerHTML = `
+      <span class="seed">${t.seed || '–'}</span>
+      <span class="nm" title="${esc(t.name)}">${esc(t.name)}</span>
+      <span class="rec">${st.type === 'playoffs' ? '' : `${r[0]}-${r[1]}`}</span>
+      <input class="adj" type="number" step="10" placeholder="±Elo" value="${esc(adj.adjust)}" aria-label="Ajuste de Elo ${esc(t.name)}">
+      <input class="lineup" placeholder="Lineup (opcional): nick1, nick2, …" value="${esc(adj.lineup)}" aria-label="Lineup ${esc(t.name)}">`;
+    $('.adj', div).addEventListener('input', (e) => { adj.adjust = e.target.value; saveForm(); });
+    $('.lineup', div).addEventListener('input', (e) => { adj.lineup = e.target.value; saveForm(); });
+    box.appendChild(div);
+  });
+  for (let k = st.conhecidos; k < st.size; k++) {
+    const div = document.createElement('div');
+    div.className = 'ev-row tbd';
+    div.innerHTML = '<span class="seed">–</span><span class="nm">TBD (vem do estágio anterior)</span>';
+    box.appendChild(div);
+  }
+}
 
 // ============================================================ abas
 function switchTab(t) {
@@ -145,7 +307,8 @@ $('#clearTeams').addEventListener('click', () => {
 // ============================================================ map pool
 function renderPool() {
   const box = $('#poolChips');
-  box.innerHTML = ALL_MAPS.map((m) => {
+  const maps = [...new Set([...ALL_MAPS, ...state.pool])];
+  box.innerHTML = maps.map((m) => {
     const on = state.pool.includes(m);
     return `<label class="${on ? 'on' : ''}"><input type="checkbox" value="${m}" ${on ? 'checked' : ''}>${m}</label>`;
   }).join('');
@@ -206,27 +369,38 @@ $('#runPredict').addEventListener('click', runPredict);
 
 async function runPredict() {
   showErr('#predictError', '');
-  const rows = state.rows.slice(0, nTeams());
-  if (rows.some((r) => !r.name.trim())) { showErr('#predictError', `Preencha os ${nTeams()} times.`); return; }
-  const lineups = {};
-  rows.forEach((r) => {
-    const l = r.lineup.split(',').map((s) => s.trim()).filter(Boolean);
-    if (l.length) lineups[r.name.trim()] = l;
-  });
+  // linhas de ajuste/lineup: do estágio do evento ou da lista manual
+  let adjRows;
   const body = {
-    format: state.format,
     boRule: $('#boRule').value,
     finalBo: Number($('#finalBo').value),
     advIncludes30: $('#adv30').checked,
     sims: Number($('#sims').value),
     pool: state.pool,
-    teams: rows.map((r, i) => ({ name: r.name.trim(), seed: i + 1 })),
-    scenario: {
-      adjust: rows.filter((r) => Number(r.adjust)).map((r) => ({ team: r.name.trim(), delta: Number(r.adjust) })),
-      lineups,
-      force: state.force.filter((f) => f.a && f.b && f.winner),
-      mapadj: state.mapadj.filter((m) => m.team && m.map && Number(m.delta)).map((m) => ({ team: m.team, map: m.map, delta: Number(m.delta) })),
-    },
+  };
+  if (state.mode === 'evento') {
+    const ev = currentEvent();
+    if (!ev) { showErr('#predictError', 'Nenhuma Major carregada. Use o modo Manual ou importe a página do evento.'); return; }
+    body.event = ev.name;
+    body.stage = state.stageIndex;
+    adjRows = Object.entries(state.teamAdj).map(([name, v]) => ({ name, adjust: v.adjust, lineup: v.lineup }));
+  } else {
+    const rows = state.rows.slice(0, nTeams());
+    if (rows.some((r) => !r.name.trim())) { showErr('#predictError', `Preencha os ${nTeams()} times.`); return; }
+    body.format = state.format;
+    body.teams = rows.map((r, i) => ({ name: r.name.trim(), seed: i + 1 }));
+    adjRows = rows.map((r) => ({ name: r.name.trim(), adjust: r.adjust, lineup: r.lineup }));
+  }
+  const lineups = {};
+  adjRows.forEach((r) => {
+    const l = String(r.lineup || '').split(',').map((s) => s.trim()).filter(Boolean);
+    if (l.length) lineups[r.name] = l;
+  });
+  body.scenario = {
+    adjust: adjRows.filter((r) => Number(r.adjust)).map((r) => ({ team: r.name, delta: Number(r.adjust) })),
+    lineups,
+    force: state.force.filter((f) => f.a && f.b && f.winner),
+    mapadj: state.mapadj.filter((m) => m.team && m.map && Number(m.delta)).map((m) => ({ team: m.team, map: m.map, delta: Number(m.delta) })),
   };
   const btn = $('#runPredict');
   btn.disabled = true;
@@ -291,34 +465,44 @@ function attachDetails(table, teams, cols) {
 function renderResults(r) {
   const box = $('#results');
   const teams = r.teams;
+  const title = r.modo === 'evento' ? `${esc(r.evento)} · ${esc(r.estagio)}` : 'Personalizado';
   const sub = `${Number(r.sims).toLocaleString('pt-BR')} simulações · pool: ${r.pool.join(', ')}`;
+  const chainNote = r.cadeia && r.cadeia.length > 1
+    ? `<p class="hint">Vagas ainda sem time foram preenchidas simulando ${r.cadeia.slice(0, -1).map(esc).join(' → ')} a cada rodada de simulação (resultados já jogados são respeitados). A coluna <b>Chega</b> mostra a chance de o time estar neste estágio.</p>`
+    : '';
+  const chained = teams.some((t) => t.participa < 0.9995);
+  const seedCell = (t) => `<td class="num">${t.seed ?? '–'}</td>`;
 
   if (r.format === 'playoffs') {
     const order = teams.map((t, i) => i).sort((a, b) => teams[b].campeao - teams[a].campeao);
     const stages = ['Quartas', 'Semi', 'Final'];
+    const occ = !r.chaveDefinida && r.ocupantes
+      ? `<p class="hint">Chave ainda não definida: usando o ocupante mais provável de cada seed — ${r.ocupantes.map((o) => `${o.pos}: ${esc(o.team)} (${pct(o.prob, 0)})`).join(' · ')}</p>`
+      : '';
     box.innerHTML = `
-      <div class="card"><div class="card-head"><h2>Playoffs</h2><span class="hint">${esc(sub)}</span></div>
+      <div class="card"><div class="card-head"><h2>${title}</h2><span class="hint">${esc(sub)}</span></div>
+        ${chainNote}
         <div class="table-wrap"><table class="tbl" id="resTable">
-          <tr><th class="num">Seed</th><th>Time</th><th class="num">Força</th><th>Semi</th><th>Final</th><th>Campeão</th></tr>
-          ${order.map((i) => { const t = teams[i]; return `<tr class="main-row" data-i="${i}"><td class="num">${t.seed}</td><td class="team-name">${esc(t.name)}</td><td class="num">${num(t.rating)}</td>${barCell(t.semi)}${barCell(t.final)}${barCell(t.campeao)}</tr>`; }).join('')}
+          <tr><th class="num">Seed</th><th>Time</th><th class="num">Força</th>${chained ? '<th>Chega</th>' : ''}<th>Semi</th><th>Final</th><th>Campeão</th></tr>
+          ${order.map((i) => { const t = teams[i]; return `<tr class="main-row" data-i="${i}">${seedCell(t)}<td class="team-name">${esc(t.name)}</td><td class="num">${num(t.rating)}</td>${chained ? barCell(t.quartas) : ''}${barCell(t.semi)}${barCell(t.final)}${barCell(t.campeao)}</tr>`; }).join('')}
         </table></div>
         ${warningsHtml(r.avisos)}
       </div>
-      <div class="card"><h2>Chave sugerida</h2><div class="bracket">
+      <div class="card"><h2>Chave sugerida</h2>${occ}<div class="bracket">
         ${stages.map((s) => `<div><h3>${s}</h3>${r.chave.filter((m) => m.fase === s).map((m) => `
           <div class="match"><span class="p">${pct(m.prob, 0)}</span>
             <div class="${m.vencedor === m.a ? 'w' : ''}">${esc(m.a)}</div>
             <div class="${m.vencedor === m.b ? 'w' : ''}">${esc(m.b)}</div></div>`).join('')}</div>`).join('')}
       </div></div>`;
-    attachDetails($('#resTable'), teams, 6);
+    attachDetails($('#resTable'), teams, chained ? 7 : 6);
     return;
   }
 
-  const pickCol = (title, cls, list) => `<div class="pick-col ${cls}"><h3>${title}</h3><ul>${list.map((p) => `<li class="pick"><span>${esc(p.team)}</span><span class="p">${pct(p.prob)}</span></li>`).join('')}</ul></div>`;
-  const order = teams.map((t, i) => i).sort((a, b) => teams[b].avanca - teams[a].avanca);
+  const pickCol = (ttl, cls, list) => `<div class="pick-col ${cls}"><h3>${ttl}</h3><ul>${list.map((p) => `<li class="pick"><span>${esc(p.team)}</span><span class="p">${pct(p.prob)}</span></li>`).join('')}</ul></div>`;
+  const order = teams.map((t, i) => i).sort((a, b) => teams[b].avanca - teams[a].avanca || teams[b].participa - teams[a].participa);
   const cats = ['3-0', '3-1', '3-2', '2-3', '1-3', '0-3'];
   box.innerHTML = `
-    <div class="card"><div class="card-head"><h2>Pick'Em sugerido</h2><span class="hint">${esc(sub)}</span></div>
+    <div class="card"><div class="card-head"><h2>Pick'Em · ${title}</h2><span class="hint">${esc(sub)}</span></div>
       <div class="pickem">
         ${pickCol('3-0', '', r.picks['3-0'])}
         ${pickCol('0-3', 'zero', r.picks['0-3'])}
@@ -329,19 +513,20 @@ function renderResults(r) {
         </div>
       </div>
       <p class="hint">Os picks maximizam a chance de bater 5 acertos considerando a correlação entre resultados, e não apenas a probabilidade individual de cada time.</p>
+      ${chainNote}
       ${warningsHtml(r.avisos)}
     </div>
     <div class="card"><h2>Probabilidades por time</h2>
       <p class="hint">Clique num time para ver lineup, K/D e rating dos jogadores, composição da força e força por mapa.</p>
       <div class="table-wrap"><table class="tbl" id="resTable">
-        <tr><th class="num">Seed</th><th>Time</th><th class="num">Força</th>${cats.map((c) => `<th class="num">${c}</th>`).join('')}<th>Avança</th></tr>
+        <tr><th class="num">Seed</th><th>Time</th><th class="num">Força</th>${chained ? '<th>Chega</th>' : ''}${cats.map((c) => `<th class="num">${c}</th>`).join('')}<th>Avança</th></tr>
         ${order.map((i) => { const t = teams[i]; return `<tr class="main-row" data-i="${i}">
-          <td class="num">${t.seed}</td><td class="team-name">${esc(t.name)}</td><td class="num">${num(t.rating)}</td>
+          ${seedCell(t)}<td class="team-name">${esc(t.name)}</td><td class="num">${num(t.rating)}</td>${chained ? barCell(t.participa) : ''}
           ${cats.map((c) => `<td class="heat" ${heat(t.dist[c])}>${pct(t.dist[c])}</td>`).join('')}
           ${barCell(t.avanca)}</tr>`; }).join('')}
       </table></div>
     </div>`;
-  attachDetails($('#resTable'), teams, 10);
+  attachDetails($('#resTable'), teams, chained ? 11 : 10);
 }
 
 // ============================================================ aba Times
@@ -452,7 +637,7 @@ function renderStatus(s) {
   logs.textContent = (s.logs || []).join('\n');
   if (atBottom) logs.scrollTop = logs.scrollHeight;
 
-  if (lastPhase && lastPhase !== s.phase && s.phase === 'pronto') loadKnownTeams();
+  if (lastPhase && lastPhase !== s.phase && s.phase === 'pronto') { loadKnownTeams(); loadEvents(); }
   lastPhase = s.phase;
 }
 
@@ -516,6 +701,8 @@ drop.addEventListener('drop', (e) => uploadFiles([...e.dataTransfer.files]));
 loadForm();
 renderPool();
 renderRows();
+applyMode();
+loadEvents();
 loadKnownTeams();
 switchTab(store.get('pp-tab', 'predict'));
 poll();

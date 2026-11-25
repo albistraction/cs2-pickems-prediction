@@ -297,6 +297,16 @@ int main() {
         sendJson(res, teamsOverview(*eng, *data, std::clamp(limit, 1, 300)));
     });
 
+    svr.Get("/api/events", [](const httplib::Request&, httplib::Response& res) {
+        std::shared_ptr<const Dataset> data;
+        {
+            std::lock_guard<std::mutex> g(app.mu);
+            data = app.data;
+        }
+        if (!data) return sendJson(res, json::array());
+        sendJson(res, eventsSummary(*data));
+    });
+
     svr.Post("/api/predict", [](const httplib::Request& req, httplib::Response& res) {
         std::shared_ptr<const Engine> eng;
         std::shared_ptr<const Dataset> data;
@@ -344,11 +354,17 @@ int main() {
             Match m;
             if (!hltv::parseMatch(req.body, m)) return sendJson(res, {{"error", "pagina de partida sem times/ID legiveis"}}, 400);
             file = "match_" + m.id + ".html";
+        } else if (type == hltv::PageType::Event) {
+            EventInfo ev;
+            if (!hltv::parseEvent(req.body, ev)) return sendJson(res, {{"error", "pagina de evento sem dados da estrutura (simulador da HLTV)"}}, 400);
+            file = "event_" + util::fnv1a(ev.name) + ".html";  // uma versão por evento (a mais recente)
         } else {
             file = std::string("import_") + hltv::typeName(type) + "_" + util::fnv1a(req.body) + ".html";
         }
         if (!util::writeFile(app.rawDir + "/" + file, req.body)) return sendJson(res, {{"error", "falha ao gravar"}}, 500);
-        sendJson(res, {{"ok", true}, {"tipo", hltv::typeName(type)}, {"arquivo", file}});
+        bool curating = false;
+        if (type == hltv::PageType::Event) curating = startJob({false, false, false});  // atualiza a estrutura do evento já
+        sendJson(res, {{"ok", true}, {"tipo", hltv::typeName(type)}, {"arquivo", file}, {"atualizando", curating}});
     });
 
     // Upload de dataset JSON: {matches:[...], ranking:[...], players:[...]}

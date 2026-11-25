@@ -21,6 +21,7 @@
         <label>Majors<input id="majors" type="number" min="1" max="30"></label>
         <label>Dias de resultados recentes<input id="dias" type="number" min="7" max="730"></label>
         <label>Intervalo entre páginas (s)<input id="intervalo" type="number" min="3" max="300"></label>
+        <label>URL da Major na HLTV (opcional)<input id="eventoUrl" type="url" placeholder="vazio = detectar em hltv.org/events"></label>
       </div>
       <button id="save" class="btn">Salvar e testar conexão</button>
       <p id="cfgMsg" class="muted"></p>
@@ -30,7 +31,8 @@
       <h2>Coleta</h2>
       <p class="muted">Uma janela separada abre e navega na HLTV. Se aparecer “Verify you are human”, o painel apita: resolva a verificação nessa janela e a coleta continua sozinha. Você pode parar e continuar depois; o que já foi enviado não é baixado de novo.</p>
       <div class="actions">
-        <button id="full" class="btn primary">Coleta completa</button>
+        <button id="event" class="btn primary">Atualizar Major (estágios e jogos)</button>
+        <button id="full" class="btn">Coleta completa</button>
         <button id="current" class="btn">Só dados atuais</button>
         <button id="stop" class="btn ghost" disabled>Parar</button>
         <button id="reset" class="btn ghost">Esquecer progresso</button>

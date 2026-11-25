@@ -51,12 +51,49 @@ struct MajorInfo {
 };
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(MajorInfo, name, date, eventIds)
 
+// ---------------------------------------------------------------- estrutura de um evento (Major)
+// Partida de um estágio. Swiss: w/l = campanha das equipes antes do jogo
+// (0-0, 1-0, ...). Playoffs: round 1 = quartas, 2 = semi, 3 = final; slot = posição na rodada.
+struct StageMatch {
+    std::string a, b, winner;  // winner vazio = ainda não jogado
+    int w = 0, l = 0;
+    int round = 0, slot = 0;
+    int scoreA = 0, scoreB = 0;
+    long long ts = 0;
+    std::string matchId;
+};
+NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(StageMatch, a, b, winner, w, l, round, slot, scoreA, scoreB, ts, matchId)
+
+struct StageTeam {
+    std::string name;  // vazio = vaga TBD
+    int seed = 0;
+};
+NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(StageTeam, name, seed)
+
+struct StageInfo {
+    std::string name, eventName, type;  // type: "swiss" | "playoffs"
+    int size = 16;                      // nº de vagas
+    std::vector<StageTeam> teams;       // times conhecidos com seed
+    std::vector<StageMatch> matches;
+    std::vector<std::vector<int>> qfSeeds;  // playoffs: pares de seeds das quartas (ex.: [1,8])
+    long long start = 0, end = 0;
+};
+NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(StageInfo, name, eventName, type, size, teams, matches, qfSeeds, start, end)
+
+struct EventInfo {
+    std::string name, eventId, updatedAt;
+    std::vector<std::string> pool;  // map pool do evento
+    std::vector<StageInfo> stages;
+};
+NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(EventInfo, name, eventId, updatedAt, pool, stages)
+
 struct Dataset {
     std::string generatedAt;
     std::vector<Match> matches;
     std::vector<RankedTeam> ranking;
     std::vector<PlayerCurrent> players;
     std::vector<MajorInfo> majors;
+    std::vector<EventInfo> events;
     nlohmann::json report = nlohmann::json::object();
 };
-NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(Dataset, generatedAt, matches, ranking, players, majors, report)
+NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(Dataset, generatedAt, matches, ranking, players, majors, events, report)

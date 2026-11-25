@@ -9,7 +9,7 @@
 
 namespace hltv {
 
-enum class PageType { Unknown, Match, Results, Archive, Ranking, PlayerStats };
+enum class PageType { Unknown, Match, Results, Archive, Ranking, PlayerStats, Event };
 PageType detect(const std::string& html);
 const char* typeName(PageType t);
 
@@ -28,6 +28,9 @@ std::vector<ResultEntry> parseResults(const std::string& html);
 std::vector<ArchiveEvent> parseArchive(const std::string& html);
 std::vector<RankedTeam> parseRanking(const std::string& html);
 std::vector<PlayerCurrent> parsePlayerStats(const std::string& html);
+// Página de evento (/events/{id}/...): lê o JSON do simulador multi-estágio da HLTV
+// (data-multi-stage-simulator-json) com todos os estágios, seeds, jogos e resultados.
+bool parseEvent(const std::string& html, EventInfo& out);
 
 // "BLAST.tv Austin Major 2025 Stage 1" -> "blast.tv austin major 2025"
 std::string majorGroupKey(const std::string& eventName);

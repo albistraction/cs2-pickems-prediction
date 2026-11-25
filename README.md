@@ -22,6 +22,18 @@ Site que prevê o **Pick'Em das Majors de CS2** com um modelo estatístico em C+
 | **Otimizador do Pick'Em** | Escolhe 2× 3-0, 2× 0-3 e 6× avança maximizando **P(≥ 5 acertos)**, considerando a correlação entre os resultados. |
 | **Treino** | Busca por coordenadas em 8 parâmetros, minimizando o log-loss *walk-forward*: cada mapa é previsto antes de ser usado. A validação usa os 20% de partidas mais recentes. O site mostra o ganho em relação ao Elo puro, para você ver quanto as stats individuais ajudam. |
 
+### Previsão por estágio da Major
+
+A página de qualquer estágio de uma Major na HLTV traz o JSON do simulador multi-estágio da própria HLTV (`data-multi-stage-simulator-json`). Esse JSON tem **todos os estágios** (Stage 1, 2, 3 e Playoffs), as seeds oficiais, os confrontos de cada rodada (agrupados por campanha: 0-0, 1-0, 0-1…), os resultados já jogados e o cruzamento das quartas. Com ele, o site:
+
+- lista os estágios com status (não começou, em andamento, terminado, aguardando times) e você escolhe qual prever;
+- usa os **confrontos reais** (1ª rodada e as seguintes, quando já marcadas) e **respeita os resultados já jogados**, simulando só o que falta, com Buchholz e regra de Bo3 da Valve;
+- preenche vagas **TBD** simulando os estágios anteriores dentro de cada rodada de Monte Carlo, ordenando os classificados por campanha → Buchholz → seed (como a Valve);
+- nos Playoffs, usa a chave real quando já definida; senão, as seeds vindas do Stage 3 (1×8, 4×5, 2×7, 3×6) e mostra o ocupante mais provável de cada vaga;
+- usa o **map pool do evento**.
+
+Para atualizar: botão **Atualizar Major** na extensão, ou envie a página salva em **Dados → Importar manualmente**. O servidor reprocessa na hora.
+
 ### Cura dos dados
 - Unifica nomes de times ("Natus Vincere" = "NAVI", "Team Vitality" = "Vitality"…) e de mapas ("de_dust2" = "Dust II").
 - Remove duplicatas, W.O., showmatches, partidas sem data ou com data no futuro, mapas não jogados e placares impossíveis.

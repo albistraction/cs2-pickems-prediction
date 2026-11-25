@@ -7,6 +7,7 @@
 #include <random>
 #include <set>
 #include <thread>
+#include <tuple>
 
 #include "util.hpp"
 
@@ -71,6 +72,7 @@ static std::vector<std::string> blocks(const std::string& s, const std::string& 
 PageType detect(const std::string& h) {
     std::string url = canonicalUrl(h);
     if (url.find("/matches/") != NPOS && h.find("mapholder") != NPOS) return PageType::Match;
+    if (h.find("data-multi-stage-simulator-json") != NPOS) return PageType::Event;
     if (h.find("player-ratings-table") != NPOS) return PageType::PlayerStats;
     if (h.find("ranked-team") != NPOS) return PageType::Ranking;
     if (h.find("result-con") != NPOS) return PageType::Results;
@@ -86,6 +88,7 @@ const char* typeName(PageType t) {
         case PageType::Archive: return "arquivo_eventos";
         case PageType::Ranking: return "ranking";
         case PageType::PlayerStats: return "stats_jogadores";
+        case PageType::Event: return "evento";
         default: return "desconhecida";
     }
 }
@@ -383,6 +386,223 @@ std::vector<PlayerCurrent> parsePlayerStats(const std::string& h) {
         out.push_back(p);
     }
     return out;
+}
+
+// ============================================================================
+// Página de evento: JSON do simulador multi-estágio da HLTV
+// ============================================================================
+namespace {
+using json = nlohmann::json;
+
+// {"eventTeamSlotId":{...},"teamId":{"teamId":4411}} -> 4411
+long long teamIdOf(const json& t) {
+    if (t.is_object() && t.contains("teamId") && t["teamId"].is_object() && t["teamId"].contains("teamId") &&
+        t["teamId"]["teamId"].is_number())
+        return t["teamId"]["teamId"].get<long long>();
+    return -1;
+}
+
+bool bucketWL(const std::string& b, int& w, int& l) {
+    static const std::map<std::string, std::pair<int, int>> m = {
+        {"ZeroZero", {0, 0}}, {"OneZero", {1, 0}}, {"ZeroOne", {0, 1}}, {"TwoZero", {2, 0}}, {"OneOne", {1, 1}},
+        {"ZeroTwo", {0, 2}},  {"TwoOne", {2, 1}},  {"OneTwo", {1, 2}},  {"TwoTwo", {2, 2}}};
+    auto it = m.find(b);
+    if (it == m.end()) return false;
+    w = it->second.first;
+    l = it->second.second;
+    return true;
+}
+
+// Procura recursivamente um "teamName" (slots da chave dos playoffs).
+std::string findTeamName(const json& j) {
+    if (j.is_object()) {
+        if (j.contains("teamName") && j["teamName"].is_string()) {
+            std::string n = j["teamName"].get<std::string>();
+            if (n != "TBD") return n;
+        }
+        for (auto it = j.begin(); it != j.end(); ++it) {
+            std::string s = findTeamName(it.value());
+            if (!s.empty()) return s;
+        }
+    } else if (j.is_array()) {
+        for (auto& x : j) {
+            std::string s = findTeamName(x);
+            if (!s.empty()) return s;
+        }
+    }
+    return "";
+}
+
+int intField(const json& j, const char* key) {
+    if (j.is_object() && j.contains(key) && j[key].is_number()) return j[key].get<int>();
+    return -1;
+}
+}  // namespace
+
+bool parseEvent(const std::string& h, EventInfo& ev) {
+    const std::string marker = "data-multi-stage-simulator-json=\"";
+    size_t p = h.find(marker);
+    if (p == NPOS) return false;
+    p += marker.size();
+    size_t q = h.find('"', p);
+    if (q == NPOS) return false;
+    json j;
+    try {
+        j = json::parse(util::htmlDecode(h.substr(p, q - p)));
+    } catch (...) {
+        return false;
+    }
+    if (!j.is_object()) return false;
+    ev.name = j.contains("name") && j["name"].is_string() ? j["name"].get<std::string>() : "";
+    std::string url = canonicalUrl(h);
+    size_t ep = url.find("/events/");
+    if (ep != NPOS) ev.eventId = util::digitsAt(url, ep + 8);
+    for (size_t mp : positions(h, "class=\"map-pool-map-name")) {
+        std::string m = util::cellText(h, mp, "</");
+        if (!m.empty()) ev.pool.push_back(m);
+    }
+
+    // ---------------- estágios Swiss
+    if (j.contains("swissStages") && j["swissStages"].is_array()) {
+        for (const auto& st : j["swissStages"]) {
+            if (!st.is_object() || !st.contains("group") || !st["group"].is_object()) continue;
+            const json& g = st["group"];
+            StageInfo s;
+            s.type = "swiss";
+            s.size = 16;
+            s.name = st.contains("name") && st["name"].is_string() ? st["name"].get<std::string>() : "Swiss";
+            s.eventName = g.contains("eventName") && g["eventName"].is_string() ? g["eventName"].get<std::string>() : s.name;
+
+            std::map<long long, std::string> names;
+            if (g.contains("teams") && g["teams"].is_array())
+                for (const auto& t : g["teams"]) {
+                    if (!t.is_object() || !t.contains("teamId") || !t.contains("teamName") || !t["teamName"].is_string()) continue;
+                    long long id = teamIdOf(t["teamId"]);
+                    std::string n = t["teamName"].get<std::string>();
+                    if (id > 0 && !n.empty() && n != "TBD") names[id] = n;
+                }
+            auto nameOf = [&](const json& tid) {
+                auto it = names.find(teamIdOf(tid));
+                return it == names.end() ? std::string() : it->second;
+            };
+
+            std::set<std::string> seeded;
+            if (g.contains("initialSeedings") && g["initialSeedings"].is_object() &&
+                g["initialSeedings"].contains("orderedSeedings") && g["initialSeedings"]["orderedSeedings"].is_array())
+                for (const auto& sd : g["initialSeedings"]["orderedSeedings"]) {
+                    if (!sd.is_object() || !sd.contains("teamId")) continue;
+                    StageTeam t;
+                    t.name = nameOf(sd["teamId"]);
+                    t.seed = intField(sd, "seedingOrdinal");
+                    if (t.name.empty() || t.seed <= 0) continue;
+                    seeded.insert(t.name);
+                    s.teams.push_back(t);
+                }
+            for (auto& kv : names)
+                if (!seeded.count(kv.second)) s.teams.push_back({kv.second, 0});
+
+            // resultados: lista achatada [chave, valor, chave, valor, ...]
+            std::map<std::tuple<int, int, long long, long long>, std::pair<int, int>> results;
+            if (g.contains("results") && g["results"].is_array()) {
+                const json& r = g["results"];
+                for (size_t i = 0; i + 1 < r.size(); i += 2) {
+                    const json& k = r[i];
+                    const json& v = r[i + 1];
+                    int w, l;
+                    if (!k.is_object() || !k.contains("swissScore") || !k["swissScore"].is_string() ||
+                        !bucketWL(k["swissScore"].get<std::string>(), w, l) || !k.contains("matchupId"))
+                        continue;
+                    const json& mu = k["matchupId"];
+                    if (!mu.is_object() || !mu.contains("team1") || !mu.contains("team2")) continue;
+                    results[std::make_tuple(w, l, teamIdOf(mu["team1"]), teamIdOf(mu["team2"]))] =
+                        {intField(v, "team1Score"), intField(v, "team2Score")};
+                }
+            }
+
+            if (g.contains("matches") && g["matches"].is_object()) {
+                for (auto it = g["matches"].begin(); it != g["matches"].end(); ++it) {
+                    int w, l;
+                    if (!bucketWL(it.key(), w, l) || !it.value().is_array()) continue;
+                    for (const auto& m : it.value()) {
+                        if (!m.is_object() || !m.contains("team1") || !m.contains("team2")) continue;
+                        long long ia = teamIdOf(m["team1"]), ib = teamIdOf(m["team2"]);
+                        StageMatch sm;
+                        sm.a = names.count(ia) ? names[ia] : "";
+                        sm.b = names.count(ib) ? names[ib] : "";
+                        if (sm.a.empty() || sm.b.empty()) continue;
+                        sm.w = w;
+                        sm.l = l;
+                        sm.round = w + l + 1;
+                        if (m.contains("timestamp") && m["timestamp"].is_number()) sm.ts = m["timestamp"].get<long long>();
+                        if (m.contains("matchId") && m["matchId"].is_object() && m["matchId"].contains("matchId") &&
+                            m["matchId"]["matchId"].is_number())
+                            sm.matchId = std::to_string(m["matchId"]["matchId"].get<long long>());
+                        auto rit = results.find(std::make_tuple(w, l, ia, ib));
+                        if (rit != results.end() && rit->second.first >= 0 && rit->second.second >= 0) {
+                            sm.scoreA = rit->second.first;
+                            sm.scoreB = rit->second.second;
+                            if (sm.scoreA != sm.scoreB) sm.winner = sm.scoreA > sm.scoreB ? sm.a : sm.b;
+                        }
+                        s.matches.push_back(sm);
+                    }
+                }
+            }
+            ev.stages.push_back(s);
+        }
+    }
+
+    // ---------------- playoffs
+    if (j.contains("playoffs") && j["playoffs"].is_object()) {
+        const json& po = j["playoffs"];
+        StageInfo s;
+        s.type = "playoffs";
+        s.size = 8;
+        s.name = po.contains("name") && po["name"].is_string() ? po["name"].get<std::string>() : "Playoffs";
+        s.eventName = ev.name;
+        if (po.contains("placement") && po["placement"].is_object() && po["placement"].contains("quarterfinals") &&
+            po["placement"]["quarterfinals"].is_array())
+            for (const auto& qf : po["placement"]["quarterfinals"]) {
+                int a = intField(qf, "team1"), b = intField(qf, "team2");
+                if (a > 0 && b > 0) s.qfSeeds.push_back({a, b});
+            }
+        if (po.contains("bracket") && po["bracket"].is_object() && po["bracket"].contains("rounds") &&
+            po["bracket"]["rounds"].is_array()) {
+            int ri = 0;
+            for (const auto& rd : po["bracket"]["rounds"]) {
+                ++ri;
+                for (int k = 1; k <= 8; ++k) {
+                    std::string key = "slot" + std::to_string(k);
+                    if (!rd.is_object() || !rd.contains(key) || !rd[key].is_object()) break;
+                    const json& sl = rd[key];
+                    StageMatch sm;
+                    sm.round = ri;
+                    sm.slot = k;
+                    if (sl.contains("matchup") && sl["matchup"].is_object()) {
+                        const json& mu = sl["matchup"];
+                        if (mu.contains("team1")) sm.a = findTeamName(mu["team1"]);
+                        if (mu.contains("team2")) sm.b = findTeamName(mu["team2"]);
+                        if (mu.contains("score") && mu["score"].is_object()) {
+                            const json& sc = mu["score"];
+                            sm.scoreA = std::max(intField(sc, "team1Score"), intField(sc, "team1"));
+                            sm.scoreB = std::max(intField(sc, "team2Score"), intField(sc, "team2"));
+                            if (sm.scoreA >= 0 && sm.scoreB >= 0 && sm.scoreA != sm.scoreB && !sm.a.empty() && !sm.b.empty())
+                                sm.winner = sm.scoreA > sm.scoreB ? sm.a : sm.b;
+                        }
+                    }
+                    s.matches.push_back(sm);
+                }
+            }
+        }
+        // times conhecidos dos playoffs: os das quartas, na ordem da chave
+        int pos = 0;
+        for (const auto& m : s.matches) {
+            if (m.round != 1) continue;
+            if (!m.a.empty()) s.teams.push_back({m.a, ++pos}); else ++pos;
+            if (!m.b.empty()) s.teams.push_back({m.b, ++pos}); else ++pos;
+        }
+        ev.stages.push_back(s);
+    }
+    return !ev.name.empty() && !ev.stages.empty();
 }
 
 // ============================================================================
