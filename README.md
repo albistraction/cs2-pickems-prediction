@@ -4,7 +4,7 @@ Site que prevê o **Pick'Em das Majors de CS2** com um modelo estatístico em C+
 
 ```
  SEU PC                                      RAILWAY
- coletor-local (navegador + você)            backend C++
+ extensão no seu Chrome (+ você)            backend C++
  HLTV ──► páginas HTML ──── upload ────►  cura dos dados ──► treino ──► modelo
           (cache local)                                                   │
                                               site ◄── /api/predict (Monte Carlo)
