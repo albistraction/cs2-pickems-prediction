@@ -159,13 +159,13 @@ bool parseMatch(const std::string& h, Match& m) {
 
     // data
     size_t dp = h.find("class=\"date\"");
-    std::string unix;
-    if (dp != NPOS) unix = util::attrValue(util::tagAt(h, dp), "data-unix");
-    if (unix.empty()) {
+    std::string unixMs;  // obs.: "unix" é macro pré-definida no g++ (modo gnu++)
+    if (dp != NPOS) unixMs = util::attrValue(util::tagAt(h, dp), "data-unix");
+    if (unixMs.empty()) {
         size_t te = h.find("timeAndEvent");
-        if (te != NPOS) unix = util::attrValue(h, "data-unix", te);
+        if (te != NPOS) unixMs = util::attrValue(h, "data-unix", te);
     }
-    m.day = util::dayFromUnixMs(unix);
+    m.day = util::dayFromUnixMs(unixMs);
     m.date = m.day > 0 ? util::dateString(m.day) : "";
 
     // evento
