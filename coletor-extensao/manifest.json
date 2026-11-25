@@ -1,0 +1,15 @@
+{
+  "manifest_version": 3,
+  "name": "Pickems Prediction - Coletor HLTV",
+  "version": "1.0.0",
+  "description": "Abre as paginas da HLTV no seu navegador e envia o HTML para o seu site pickems-prediction.",
+  "action": {
+    "default_title": "Abrir o coletor HLTV"
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "permissions": ["storage", "tabs", "scripting", "unlimitedStorage"],
+  "host_permissions": ["https://www.hltv.org/*"],
+  "optional_host_permissions": ["https://*/*", "http://localhost/*", "http://127.0.0.1/*"]
+}

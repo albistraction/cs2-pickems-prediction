@@ -1,0 +1,26 @@
+COLETOR HLTV (extensao para Chrome / Edge) - pickems-prediction
+=================================================================
+
+Abre as paginas da HLTV no SEU navegador (com seus cookies, como se voce
+estivesse navegando), extrai o HTML e envia para o seu site. Quando a
+Cloudflare pedir "Verify you are human", voce resolve e a coleta continua.
+
+INSTALAR (uma vez)
+  1. Abra chrome://extensions  (no Edge: edge://extensions)
+  2. Ligue o "Modo do desenvolvedor" (canto superior direito)
+  3. "Carregar sem compactacao" -> escolha esta pasta (coletor-extensao)
+  4. Fixe a extensao na barra (icone de quebra-cabeca -> alfinete)
+
+USAR
+  1. Clique no icone da extensao -> abre o painel
+  2. Preencha a URL do site e o ADMIN_TOKEN -> "Salvar e testar conexao"
+     (o navegador pede permissao para acessar o seu site: aceite)
+  3. "Coleta completa" na primeira vez (horas), "So dados atuais" antes
+     de cada Major (minutos)
+  4. Uma janela separada abre e navega sozinha. Deixe o painel aberto.
+     Se a verificacao aparecer, o painel apita: resolva na janela da HLTV.
+
+DICAS
+  - Intervalo de 6 a 10 s costuma funcionar. Muito rapido = mais verificacoes.
+  - "Parar" interrompe; a proxima coleta continua de onde parou.
+  - "you have been blocked" = IP bloqueado temporariamente: espere.

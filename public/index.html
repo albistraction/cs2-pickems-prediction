@@ -134,11 +134,11 @@
           </div>
 
           <div class="card">
-            <h2>Coletor local</h2>
-            <p class="hint">A HLTV bloqueia servidores, então a coleta roda no seu PC: a pasta <code>coletor-local</code> do projeto abre a HLTV num navegador, percorre as últimas Majors, partidas (K/D, rating), ranking e stats, e envia tudo para cá. Quando a Cloudflare pedir verificação, você resolve na janela e ele continua.</p>
+            <h2>Coletor (extensão do navegador)</h2>
+            <p class="hint">A HLTV bloqueia servidores e navegadores automatizados, então a coleta roda no <b>seu</b> Chrome/Edge: a extensão da pasta <code>coletor-extensao</code> abre as últimas Majors, partidas (K/D, rating), ranking e stats e envia tudo para cá. Quando a Cloudflare pedir verificação, você resolve e ela continua.</p>
             <ol class="hint steps">
-              <li>Instale o Node.js e dê dois cliques em <code>instalar.bat</code>.</li>
-              <li>Dois cliques em <code>coletar.bat</code> → informe a URL deste site e o token.</li>
+              <li><code>chrome://extensions</code> → Modo do desenvolvedor → <b>Carregar sem compactação</b> → pasta <code>coletor-extensao</code>.</li>
+              <li>Clique no ícone da extensão → informe a URL deste site e o token → Salvar.</li>
               <li><b>Coleta completa</b> na primeira vez; <b>Só dados atuais</b> antes de cada Major.</li>
             </ol>
           </div>

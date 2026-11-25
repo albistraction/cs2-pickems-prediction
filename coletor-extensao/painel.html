@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Coletor HLTV</title>
+  <link rel="stylesheet" href="painel.css">
+</head>
+<body>
+  <header>
+    <h1>PICKEMS<span>PREDICTION</span> · coletor HLTV</h1>
+    <span id="siteState" class="pill">site: ?</span>
+  </header>
+
+  <main>
+    <section class="card">
+      <h2>Configuração</h2>
+      <div class="grid">
+        <label>URL do site<input id="site" type="url" placeholder="https://seu-app.up.railway.app"></label>
+        <label>Token de administrador<input id="token" type="password" autocomplete="off" placeholder="ADMIN_TOKEN do Railway"></label>
+        <label>Majors<input id="majors" type="number" min="1" max="30"></label>
+        <label>Dias de resultados recentes<input id="dias" type="number" min="7" max="730"></label>
+        <label>Intervalo entre páginas (s)<input id="intervalo" type="number" min="3" max="300"></label>
+      </div>
+      <button id="save" class="btn">Salvar e testar conexão</button>
+      <p id="cfgMsg" class="muted"></p>
+    </section>
+
+    <section class="card">
+      <h2>Coleta</h2>
+      <p class="muted">Uma janela separada abre e navega na HLTV. Se aparecer “Verify you are human”, o painel apita: resolva a verificação nessa janela e a coleta continua sozinha. Você pode parar e continuar depois; o que já foi enviado não é baixado de novo.</p>
+      <div class="actions">
+        <button id="full" class="btn primary">Coleta completa</button>
+        <button id="current" class="btn">Só dados atuais</button>
+        <button id="stop" class="btn ghost" disabled>Parar</button>
+        <button id="reset" class="btn ghost">Esquecer progresso</button>
+      </div>
+      <div id="alert" class="alert" hidden>⚠ A HLTV pediu verificação. Resolva na janela da HLTV que abriu.</div>
+      <div class="status"><span id="statusText">Parado</span><span id="counters" class="muted"></span></div>
+      <div class="progress"><div id="bar"></div></div>
+    </section>
+
+    <section class="card">
+      <h2>Log</h2>
+      <div id="log" class="log"></div>
+    </section>
+  </main>
+  <script src="painel.js"></script>
+</body>
+</html>

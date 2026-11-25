@@ -6,7 +6,7 @@
 //   PUBLIC_DIR        arquivos do site                                    [./public]
 //   ADMIN_TOKEN       se definido, exigido (header X-Admin-Token) nas rotas que alteram dados
 //   AUTO_COLLECT      1 = servidor tenta coletar da HLTV na 1ª execução  [0]
-//                     (a HLTV bloqueia servidores; o normal é usar o coletor-local)
+//                     (a HLTV bloqueia servidores; o normal é usar o coletor-extensao)
 //   REFRESH_HOURS     coleta periódica pelo servidor (0 = off)            [0]
 //   MAJORS            quantas Majors usar no treino                       [10]
 //   RECENT_DAYS       janela de resultados recentes                       [120]
@@ -202,8 +202,8 @@ void loadState() {
         startJob({true, false, true});
     } else {
         app.setPhase("sem_dados", 0,
-                     "Aguardando dados: rode o coletor local (pasta coletor-local, opcao 'Coleta completa'). "
-                     "Ele envia as paginas da HLTV para ca e o treino comeca sozinho.");
+                     "Aguardando dados: use a extensao do navegador (pasta coletor-extensao, 'Coleta completa'). "
+                     "Ela envia as paginas da HLTV para ca e o treino comeca sozinho.");
     }
 }
 

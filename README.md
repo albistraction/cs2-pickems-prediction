@@ -31,21 +31,19 @@ Site que prevê o **Pick'Em das Majors de CS2** com um modelo estatístico em C+
 
 Tudo isso sai num relatório na aba **Dados**.
 
-## Coleta dos dados: coletor local (`coletor-local/`)
+## Coleta dos dados: extensão do navegador (`coletor-extensao/`)
 
-A HLTV usa proteção anti-bot (Cloudflare). Nos testes, pedidos de programa (curl, Chromium headless) foram bloqueados. Um navegador com janela passou na 1ª página, mas nas seguintes a HLTV pediu a verificação "sou humano". Por isso **a coleta roda no seu PC, com você presente**:
+A HLTV usa proteção anti-bot (Cloudflare). Nos testes, servidores, curl e navegadores automatizados (Playwright) foram bloqueados: em navegador automatizado, a verificação "sou humano" fica em loop. Por isso a coleta roda **no seu próprio Chrome/Edge, com você presente**, por uma extensão:
 
-1. Instale o [Node.js](https://nodejs.org) LTS.
-2. Na pasta `coletor-local`, dois cliques em **`instalar.bat`** (baixa o Playwright e o Chromium).
-3. Dois cliques em **`coletar.bat`** e informe a URL do site e o `ADMIN_TOKEN`.
-4. Escolha a opção:
-   - **Coleta completa**: as 10 últimas Majors (juntando os estágios), 120 dias de resultados, ranking e stats. Use na primeira vez e depois uma vez por ano. Leva horas.
-   - **Só dados atuais**: ranking, stats dos últimos 90 dias e resultados recentes. Use antes de cada Major. Leva minutos.
-   - **Reenviar**: sobe o que ficou pendente, se o site estava fora do ar.
+1. Abra `chrome://extensions` (ou `edge://extensions`), ligue o **Modo do desenvolvedor** e clique em **Carregar sem compactação**. Escolha a pasta `coletor-extensao`.
+2. Clique no ícone da extensão para abrir o painel. Informe a URL do site e o `ADMIN_TOKEN` e clique em **Salvar**; o navegador pede permissão para acessar o site.
+3. Escolha:
+   - **Coleta completa**: as 10 últimas Majors (juntando os estágios), resultados recentes, ranking e stats. Use na primeira vez e depois uma vez por ano. Leva horas.
+   - **Só dados atuais**: ranking, stats dos últimos 90 dias e resultados recentes. Use antes de cada Major.
 
-Uma janela do Chromium abre e o coletor navega sozinho, com uma página a cada ~5 s e pausas aleatórias. **Quando aparecer a verificação da Cloudflare, ele apita e espera você resolver na janela.** Ele não tenta resolver o CAPTCHA sozinho. Cada página vai direto para `/api/import/html`, e no fim o coletor pede ao servidor para curar e treinar. Ctrl+C interrompe; rodando de novo, ele continua de onde parou. As partidas ficam em cache em `coletor-local/dados/`.
+Uma janela separada navega sozinha, com uma página a cada ~8 s e pausas aleatórias. **Quando aparecer a verificação da Cloudflare, o painel apita e você resolve na janela.** A extensão não tenta resolver o CAPTCHA. Cada página vai direto para `/api/import/html`, e no fim a extensão pede ao servidor para curar e treinar. **Parar** interrompe; a próxima coleta continua de onde parou.
 
-> Isso vai contra os termos de uso da HLTV. Se aparecer "you have been blocked", o IP foi bloqueado temporariamente: espere e aumente o intervalo em *Configurar*.
+> Isso vai contra os termos de uso da HLTV. Se aparecer "you have been blocked", o IP foi bloqueado temporariamente: espere e aumente o intervalo.
 
 ### Importação manual (alternativa)
 Páginas salvas no navegador com **Ctrl+S → "Página da Web, somente HTML"** podem ser enviadas na aba **Dados**. O tipo de página é detectado automaticamente: partida, resultados, ranking, stats ou arquivo de Majors.
@@ -87,7 +85,7 @@ Também dá para importar JSON (`POST /api/import/json`):
 
 5. **Settings → Networking → Generate Domain** para ter a URL pública.
 
-Na primeira execução o site mostra **"Aguardando dados"**. Rode a **Coleta completa** no `coletor-local`: as páginas chegam ao servidor e o treino começa sozinho no final. O progresso aparece na aba **Dados**. Para testar o deploy antes disso, use **Carregar dados demo** (times fictícios "Demo 01…") e depois **Remover dados demo**.
+Na primeira execução o site mostra **"Aguardando dados"**. Rode a **Coleta completa** na extensão: as páginas chegam ao servidor e o treino começa sozinho no final. O progresso aparece na aba **Dados**. Para testar o deploy antes disso, use **Carregar dados demo** (times fictícios "Demo 01…") e depois **Remover dados demo**.
 
 ## Rodar localmente
 
@@ -140,7 +138,7 @@ O exemplo mostra só 2 times para ficar curto; o Swiss exige 16 e os Playoffs, 8
 ## Estrutura
 
 ```
-coletor-local/     programa para o seu PC: navega na HLTV (Playwright) e envia ao site
+coletor-extensao/  extensão Chrome/Edge: navega na HLTV no seu navegador e envia ao site
 src/main.cpp       servidor HTTP, pipeline em background
 src/hltv.cpp       parsers das páginas + coletor (cache, limite, detecção de bloqueio)
 src/curation.cpp   cura dos dados + relatório
