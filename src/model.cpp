@@ -18,6 +18,7 @@ namespace {
 
 double elo2p(double d) { return 1.0 / (1.0 + std::pow(10.0, -d / 400.0)); }
 const int CS2_RELEASE_DAY = util::daysFromCivil(2023, 9, 27);  // MR12 a partir daqui
+const double ADR_BASE = 75.0, KAST_BASE = 72.0;
 
 void recenter(TeamState& s) {
     if (s.off.size() < 2) return;
@@ -26,6 +27,8 @@ void recenter(TeamState& s) {
     mean /= static_cast<double>(s.off.size());
     for (auto& o : s.off) o.second -= mean;
 }
+
+std::string h2hKey(const std::string& a, const std::string& b) { return a < b ? a + "|" + b : b + "|" + a; }
 
 const std::vector<std::string> DEFAULT_POOL = {"ancient", "anubis", "dust2", "inferno", "mirage", "nuke", "train"};
 
@@ -46,10 +49,12 @@ double Params::tierWeight(const std::string& t) const {
 
 void Engine::decayTo(TeamState& s, int day) const {
     if (s.last >= 0 && day > s.last) {
-        double f = std::exp(-(day - s.last) / P.tau);
+        double dt = day - s.last;
+        double f = std::exp(-dt / P.tau);
         s.r = 1500 + (s.r - 1500) * f;
         for (auto& o : s.off) o.second *= f;
         s.n *= f;
+        s.form *= std::exp(-dt / std::max(1.0, P.tauForm));
     }
     if (day > s.last) s.last = day;
 }
@@ -59,32 +64,70 @@ double Engine::offset(const TeamState& s, const std::string& map) {
     return it == s.off.end() ? 0.0 : it->second;
 }
 
-void Engine::playerShrunk(const std::string& nick, double& rating, double& kd, double& n) const {
-    double r = 1.0, k = 1.0, nn = 0;
+void Engine::playerShrunk(const std::string& nick, PlayerState& out) const {
+    out = PlayerState();
     auto it = PL.find(playerKey(nick));
-    if (it != PL.end()) {
-        r = it->second.rating;
-        k = it->second.kd;
-        nn = it->second.n;
-    }
+    if (it == PL.end()) return;
+    const PlayerState& p = it->second;
     const double n0 = 4.0;  // "jogos fantasma" na média
-    rating = (nn * r + n0) / (nn + n0);
-    kd = (nn * k + n0) / (nn + n0);
-    n = nn;
+    auto sh = [&](double x, double prior) { return (p.n * x + n0 * prior) / (p.n + n0); };
+    out.rating = sh(p.rating, 1.0);
+    out.kd = sh(p.kd, 1.0);
+    out.adr = sh(p.adr, ADR_BASE);
+    out.kast = sh(p.kast, KAST_BASE);
+    out.n = p.n;
 }
 
-double Engine::playerIndex(const std::vector<std::string>& lineup) const {
-    if (lineup.empty()) return 0;
-    double sum = 0;
+PlayerAgg Engine::playerAgg(const std::vector<std::string>& lineup) const {
+    PlayerAgg a;
+    if (lineup.empty()) return a;
+    a.rating = a.kd = a.adr = a.kast = 0;
     for (auto& nick : lineup) {
-        double r, kd, n;
-        playerShrunk(nick, r, kd, n);
-        sum += composite(r, kd);
+        PlayerState ps;
+        playerShrunk(nick, ps);
+        a.rating += ps.rating;
+        a.kd += ps.kd;
+        a.adr += ps.adr;
+        a.kast += ps.kast;
     }
-    return sum / static_cast<double>(lineup.size());
+    double n = static_cast<double>(lineup.size());
+    a.rating /= n;
+    a.kd /= n;
+    a.adr /= n;
+    a.kast /= n;
+    return a;
 }
 
-void Engine::lineupChange(TeamState& s, const std::vector<std::string>& lineup) {
+double Engine::playerBonus(const PlayerAgg& a) const {
+    return P.wRating * (a.rating - 1) + P.wKD * (a.kd - 1) + P.wADR * (a.adr / ADR_BASE - 1) +
+           P.wKAST * (a.kast / KAST_BASE - 1);
+}
+
+double Engine::restScore(const TeamState& s, int day) const {
+    int d = s.lastPlayed < 0 ? 30 : std::max(0, day - s.lastPlayed);
+    return std::log1p(static_cast<double>(d));
+}
+
+double Engine::stability(const TeamState& s, int day) const {
+    double d = std::max(0, day - s.lastChange);
+    return 1.0 - std::exp(-d / 45.0);
+}
+
+double Engine::h2h(const std::string& ka, const std::string& kb, int day) const {
+    auto it = H2.find(h2hKey(ka, kb));
+    if (it == H2.end()) return 0;
+    double v = it->second.first * std::exp(-std::max(0, day - it->second.second) / P.tau);
+    return ka < kb ? v : -v;
+}
+
+void Engine::h2hAdd(const std::string& ka, const std::string& kb, double v, int day) {
+    auto& e = H2[h2hKey(ka, kb)];
+    double cur = e.first * std::exp(-std::max(0, day - e.second) / P.tau);
+    e.first = cur + (ka < kb ? v : -v);
+    e.second = day;
+}
+
+void Engine::lineupChange(TeamState& s, const std::vector<std::string>& lineup, int day) {
     if (lineup.size() < 4) return;
     if (s.lineup.size() >= 4) {
         std::set<std::string> prev;
@@ -97,23 +140,30 @@ void Engine::lineupChange(TeamState& s, const std::vector<std::string>& lineup) 
             s.r = 1500 + (s.r - 1500) * f;
             for (auto& o : s.off) o.second *= f;
             s.n *= f;
+            s.form *= f;
+            s.lastChange = day;
         }
     }
     s.lineup = lineup;
 }
 
-void Engine::updatePlayer(const PlayerLine& p) {
+void Engine::updatePlayer(const PlayerLine& p, double oppRating) {
     auto& ps = PL[playerKey(p.name)];
-    double kd = std::clamp(p.kills / static_cast<double>(std::max(1, p.deaths)), 0.1, 4.0);
+    // stat contra adversário forte vale mais; contra fraco, menos
+    double f = std::clamp(1.0 + P.gamma * (oppRating - 1500) / 400.0, 0.5, 1.5);
+    double kd = std::clamp(p.kills / static_cast<double>(std::max(1, p.deaths)), 0.1, 4.0) * f;
     double w = std::max(P.playerAlpha, 1.0 / (ps.n + 1.0));
     ps.kd += w * (kd - ps.kd);
-    if (p.rating > 0) ps.rating += w * (std::clamp(p.rating, 0.1, 3.0) - ps.rating);
-    else ps.rating += 0.5 * w * (kd - ps.rating);  // sem rating: usa K/D como aproximação
+    if (p.rating > 0) ps.rating += w * (std::clamp(p.rating, 0.1, 3.0) * f - ps.rating);
+    else ps.rating += 0.5 * w * (kd - ps.rating);  // sem rating: K/D como aproximação
+    if (p.adr > 0) ps.adr += w * (std::clamp(p.adr, 10.0, 250.0) * f - ps.adr);
+    if (p.kast > 0) ps.kast += w * (std::min(100.0, std::clamp(p.kast, 10.0, 100.0) * f) - ps.kast);
     ps.n += 1;
 }
 
 Metrics Engine::run(const std::vector<Match>& ms, size_t scoreFrom, size_t scoreTo, int untilDay) {
     Metrics sc;
+    std::vector<std::array<double, 3>> bins(10, std::array<double, 3>{0, 0, 0});
     for (size_t i = 0; i < ms.size(); ++i) {
         const Match& m = ms[i];
         if (m.day >= untilDay) break;
@@ -129,10 +179,13 @@ Metrics Engine::run(const std::vector<Match>& ms, size_t scoreFrom, size_t score
         std::vector<std::string> la, lb;
         for (auto& p : m.p1) la.push_back(p.name);
         for (auto& p : m.p2) lb.push_back(p.name);
-        lineupChange(A, la);
-        lineupChange(B, lb);
-        double pia = playerIndex(la.empty() ? A.lineup : la);
-        double pib = playerIndex(lb.empty() ? B.lineup : lb);
+        lineupChange(A, la, m.day);
+        lineupChange(B, lb, m.day);
+        PlayerAgg ga = playerAgg(la.empty() ? A.lineup : la);
+        PlayerAgg gb = playerAgg(lb.empty() ? B.lineup : lb);
+        double extra = playerBonus(ga) - playerBonus(gb) + P.wRust * (restScore(A, m.day) - restScore(B, m.day)) +
+                       P.wSyn * (stability(A, m.day) - stability(B, m.day));
+        double preA = A.r, preB = B.r;
 
         bool scoring = i >= scoreFrom && i < scoreTo;
         double tw = P.tierWeight(m.tier);
@@ -140,7 +193,7 @@ Metrics Engine::run(const std::vector<Match>& ms, size_t scoreFrom, size_t score
         for (auto& mp : m.maps) {
             if (mp.r1 == mp.r2) continue;
             bool experienced = A.n >= 5 && B.n >= 5;
-            double diff = A.r + offset(A, mp.map) - B.r - offset(B, mp.map) + P.beta * (pia - pib);
+            double diff = A.r + offset(A, mp.map) + A.form - B.r - offset(B, mp.map) - B.form + h2h(ka, kb, m.day) + extra;
             double p = elo2p(diff);
             double y = mp.r1 > mp.r2 ? 1.0 : 0.0;
             if (scoring && experienced) {
@@ -149,6 +202,10 @@ Metrics Engine::run(const std::vector<Match>& ms, size_t scoreFrom, size_t score
                 sc.brier += (p - y) * (p - y);
                 sc.acc += ((p > 0.5) == (y > 0.5)) ? 1 : 0;
                 sc.count++;
+                auto& b = bins[std::min(9, static_cast<int>(p * 10))];
+                b[0] += p;
+                b[1] += y;
+                b[2] += 1;
             }
             double mult = 1.0 + P.margin * std::min(1.0, std::abs(mp.r1 - mp.r2) / target);
             double d = tw * mult * (y - p);
@@ -158,11 +215,16 @@ Metrics Engine::run(const std::vector<Match>& ms, size_t scoreFrom, size_t score
             B.off[mp.map] -= P.kmap * d;
             recenter(A);
             recenter(B);
+            A.form += P.kForm * d;
+            B.form -= P.kForm * d;
+            h2hAdd(ka, kb, P.kH2H * d, m.day);
             A.n += 1;
             B.n += 1;
         }
-        for (auto& p : m.p1) updatePlayer(p);
-        for (auto& p : m.p2) updatePlayer(p);
+        for (auto& p : m.p1) updatePlayer(p, preB);
+        for (auto& p : m.p2) updatePlayer(p, preA);
+        A.lastPlayed = m.day;
+        B.lastPlayed = m.day;
         lastDay = std::max(lastDay, m.day);
     }
     if (sc.count) {
@@ -170,11 +232,13 @@ Metrics Engine::run(const std::vector<Match>& ms, size_t scoreFrom, size_t score
         sc.brier /= sc.count;
         sc.acc /= sc.count;
     }
+    for (auto& b : bins)
+        if (b[2] > 0) sc.calib.push_back({b[0] / b[2], b[1] / b[2], b[2]});
     return sc;
 }
 
 // ============================================================================
-// Treino: busca por coordenadas, log-loss walk-forward
+// Treino: busca por coordenadas, log-loss walk-forward + importância dos fatores
 // ============================================================================
 json TrainReport::toJson() const {
     return json{{"params", params},
@@ -184,6 +248,7 @@ json TrainReport::toJson() const {
                 {"chute5050", 0.693147},
                 {"partidasTreino", trainMatches},
                 {"partidasValidacao", validMatches},
+                {"importancia", ablation},
                 {"passos", steps}};
 }
 
@@ -201,21 +266,27 @@ TrainReport train(const std::vector<Match>& ms, const Params& start,
         Metrics m = e.run(ms, 0, split);
         return m.count >= 30 ? m.logloss : 1e9;
     };
-    {
-        Engine e(P);
-        R.before = e.run(ms, split, ms.size());
-    }
+    auto evalValid = [&](const Params& p) {
+        Engine e(p);
+        return e.run(ms, split, ms.size());
+    };
+    R.before = evalValid(P);
+
     struct Dim {
         double* v;
         double lo, hi;
         const char* name;
     };
-    std::vector<Dim> dims = {{&P.k, 4, 150, "k"},           {&P.kmap, 0, 100, "kmap"},
-                             {&P.margin, 0, 3, "margin"},   {&P.tau, 20, 1500, "tau"},
-                             {&P.roster, 0, 0.35, "roster"}, {&P.beta, 0, 2500, "beta"},
-                             {&P.kdMix, 0, 1, "kdMix"},     {&P.playerAlpha, 0.02, 0.6, "playerAlpha"}};
+    std::vector<Dim> dims = {
+        {&P.k, 4, 150, "k"},           {&P.kmap, 0, 100, "kmap"},       {&P.margin, 0, 3, "margin"},
+        {&P.tau, 20, 1500, "tau"},     {&P.roster, 0, 0.35, "roster"},  {&P.wRating, 0, 2000, "wRating"},
+        {&P.wKD, 0, 1500, "wKD"},      {&P.wADR, 0, 1500, "wADR"},      {&P.wKAST, 0, 1500, "wKAST"},
+        {&P.gamma, 0, 1, "gamma"},     {&P.playerAlpha, 0.02, 0.6, "playerAlpha"},
+        {&P.kForm, 0, 60, "kForm"},    {&P.tauForm, 5, 120, "tauForm"}, {&P.kH2H, 0, 30, "kH2H"},
+        {&P.wRust, -80, 80, "wRust"},  {&P.wSyn, 0, 200, "wSyn"}};
     double best = evalTrain(P);
-    log("Treino: log-loss inicial " + std::to_string(best) + " (" + std::to_string(split) + " partidas)");
+    log("Treino: log-loss inicial " + std::to_string(best) + " (" + std::to_string(split) + " partidas, " +
+        std::to_string(dims.size()) + " parametros)");
     double step = 0.25;
     int evals = 0;
     while (step > 0.01 && !stop) {
@@ -232,8 +303,7 @@ TrainReport train(const std::vector<Match>& ms, const Params& start,
                 if (s < best - 1e-7) {
                     best = s;
                     improved = true;
-                    std::string msg = std::string(d.name) + " = " + std::to_string(cand) +
-                                      "  (log-loss " + std::to_string(s) + ")";
+                    std::string msg = std::string(d.name) + " = " + std::to_string(cand) + "  (log-loss " + std::to_string(s) + ")";
                     R.steps.push_back(msg);
                     log("  " + msg);
                 } else {
@@ -243,13 +313,42 @@ TrainReport train(const std::vector<Match>& ms, const Params& start,
         }
         if (!improved) step /= 2;
     }
+    R.after = evalValid(P);
     {
-        Engine e(P);
-        R.after = e.run(ms, split, ms.size());
         Params p0 = P;
-        p0.beta = 0;
-        Engine e0(p0);
-        R.eloOnly = e0.run(ms, split, ms.size());
+        p0.wRating = p0.wKD = p0.wADR = p0.wKAST = 0;
+        p0.kForm = p0.kH2H = p0.wRust = p0.wSyn = 0;
+        R.eloOnly = evalValid(p0);
+    }
+
+    // importância: tira um fator por vez e mede a piora na validação
+    struct Abl {
+        const char* name;
+        std::function<void(Params&)> off;
+    };
+    std::vector<Abl> abl = {
+        {"Estatisticas dos jogadores (todas)", [](Params& p) { p.wRating = p.wKD = p.wADR = p.wKAST = 0; }},
+        {"Rating HLTV dos jogadores", [](Params& p) { p.wRating = 0; }},
+        {"K/D dos jogadores", [](Params& p) { p.wKD = 0; }},
+        {"ADR dos jogadores", [](Params& p) { p.wADR = 0; }},
+        {"KAST dos jogadores", [](Params& p) { p.wKAST = 0; }},
+        {"Ajuste pela forca do adversario", [](Params& p) { p.gamma = 0; }},
+        {"Forma recente", [](Params& p) { p.kForm = 0; }},
+        {"Confronto direto (H2H)", [](Params& p) { p.kH2H = 0; }},
+        {"Descanso / inatividade", [](Params& p) { p.wRust = 0; }},
+        {"Entrosamento da lineup", [](Params& p) { p.wSyn = 0; }},
+        {"Forca por mapa", [](Params& p) { p.kmap = 0; }},
+        {"Margem de rounds", [](Params& p) { p.margin = 0; }},
+        {"Troca de roster", [](Params& p) { p.roster = 0; }}};
+    for (auto& a : abl) {
+        if (stop) break;
+        Params p0 = P;
+        a.off(p0);
+        Metrics m = evalValid(p0);
+        R.ablation.push_back({{"fator", a.name},
+                              {"logloss", m.logloss},
+                              {"piora", m.logloss - R.after.logloss},
+                              {"acertoSem", m.acc}});
     }
     log("Treino concluido (" + std::to_string(evals) + " avaliacoes). Validacao: log-loss " +
         std::to_string(R.before.logloss) + " -> " + std::to_string(R.after.logloss) + ", acerto " +
@@ -262,12 +361,18 @@ TrainReport train(const std::vector<Match>& ms, const Params& start,
 // ============================================================================
 namespace {
 
-// adv[m] = vantagem Elo do time A (que começa o veto) no mapa m
-double seriesProb(const std::vector<double>& adv, int bo) {
+struct VetoStep {
+    int map;
+    bool byA, ban;
+};
+
+// Veto guloso: cada time pica onde tem mais vantagem e bane onde tem menos.
+// adv[m] = vantagem Elo do time A (que começa o veto) no mapa m.
+void vetoOrder(const std::vector<double>& adv, int bo, std::vector<int>& order, std::vector<VetoStep>* steps) {
     int nm = static_cast<int>(adv.size());
     std::vector<bool> avail(nm, true);
     int left = nm;
-    std::vector<int> order;
+    order.clear();
     auto choose = [&](bool teamA, bool ban) {
         int best = -1;
         double bestVal = 0;
@@ -279,6 +384,7 @@ double seriesProb(const std::vector<double>& adv, int bo) {
         }
         avail[best] = false;
         --left;
+        if (steps) steps->push_back({best, teamA, ban});
         return best;
     };
     int picks = bo == 1 ? 0 : bo - 1;
@@ -286,9 +392,12 @@ double seriesProb(const std::vector<double>& adv, int bo) {
     for (int i = 0; i < 2 && left - 1 > picks; ++i, turnA = !turnA) choose(turnA, true);
     for (int i = 0; i < picks && left > 1; ++i, turnA = !turnA) order.push_back(choose(turnA, false));
     while (left > 1) { choose(turnA, true); turnA = !turnA; }
-    for (int m = 0; m < nm; ++m) if (avail[m]) order.push_back(m);
+    for (int m = 0; m < nm; ++m)
+        if (avail[m]) order.push_back(m);
     while (static_cast<int>(order.size()) < bo) order.push_back(order.back());
+}
 
+double seriesFromOrder(const std::vector<double>& adv, const std::vector<int>& order, int bo) {
     int need = bo / 2 + 1;
     std::vector<std::vector<double>> dp(need + 1, std::vector<double>(need + 1, 0));
     dp[0][0] = 1;
@@ -304,10 +413,17 @@ double seriesProb(const std::vector<double>& adv, int bo) {
     return win;
 }
 
+double seriesProb(const std::vector<double>& adv, int bo) {
+    std::vector<int> order;
+    vetoOrder(adv, bo, order, nullptr);
+    return seriesFromOrder(adv, order, bo);
+}
+
 struct SimModel {
     std::vector<double> r, sigma;
     std::vector<std::vector<double>> off;
-    std::map<std::pair<int, int>, int> forced;  // (menor, maior) índice global -> vencedor
+    std::map<std::pair<int, int>, int> forced;     // (menor, maior) índice global -> vencedor
+    std::map<std::pair<int, int>, double> h2h;     // (menor, maior) -> Elo extra para o menor
 };
 
 // Jogo conhecido/agendado de um estágio Swiss (índices globais). winner -1 = ainda não jogado.
@@ -322,7 +438,7 @@ struct ChainStage {
     std::vector<int> slots;                 // swiss: posição = seed-1 | playoffs: posições da chave
     std::vector<std::pair<int, int>> qf;    // playoffs: pares de posições das quartas, na ordem da chave
     std::map<std::pair<int, int>, std::vector<FixedMatch>> fixed;  // swiss: campanha (w,l) -> jogos
-    bool slotsKnown = true;                 // todas as vagas já definidas (sem TBD)
+    bool slotsKnown = true;
 };
 
 bool pairUp(const std::vector<int>& list, const std::vector<std::vector<int>>& opp, bool allowRematch,
@@ -351,11 +467,18 @@ public:
     }
     void meanRatings() { rr = M.r; }
 
-    double prob(int i, int j, int bo) const {
-        std::vector<double> adv(M.off[i].size());
-        for (size_t m = 0; m < adv.size(); ++m) adv[m] = rr[i] + M.off[i][m] - rr[j] - M.off[j][m];
-        return seriesProb(adv, bo);
+    double h2hFor(int i, int j) const {
+        auto it = M.h2h.find({std::min(i, j), std::max(i, j)});
+        if (it == M.h2h.end()) return 0;
+        return i < j ? it->second : -it->second;
     }
+    std::vector<double> advantages(int i, int j) const {
+        std::vector<double> adv(M.off[i].size());
+        double h = h2hFor(i, j);
+        for (size_t m = 0; m < adv.size(); ++m) adv[m] = rr[i] + M.off[i][m] - rr[j] - M.off[j][m] + h;
+        return adv;
+    }
+    double prob(int i, int j, int bo) const { return seriesProb(advantages(i, j), bo); }
     // prob. de `a` vencer `b` (a começa o veto), considerando resultados forçados
     double probFor(int a, int b, int bo) const {
         auto it = M.forced.find({std::min(a, b), std::max(a, b)});
@@ -404,7 +527,6 @@ public:
             std::vector<std::array<int, 3>> games;
             for (auto& g : groups) {
                 std::vector<int> v = g.second;
-                // jogos reais (já jogados ou agendados) desta campanha
                 auto fit = fixed.find(g.first);
                 if (fit != fixed.end()) {
                     for (const auto& fm : fit->second) {
@@ -419,8 +541,7 @@ public:
                 if (v.size() < 2) continue;
                 std::vector<std::pair<int, int>> pairs;
                 if (g.first.first == 0 && g.first.second == 0) {
-                    // 1ª rodada: seed i x seed i + n/2 (1x9, 2x10, ...)
-                    std::sort(v.begin(), v.end());
+                    std::sort(v.begin(), v.end());  // 1ª rodada: 1x9, 2x10, ...
                     size_t h = v.size() / 2;
                     for (size_t k = 0; k < h; ++k) pairs.push_back({v[k], v[k + h]});
                 } else {
@@ -443,9 +564,7 @@ public:
     // reach[pos]: 0 = caiu nas quartas, 1 = semi, 2 = final, 3 = campeão
     void playoffs(const std::vector<int>& slots, const std::vector<std::pair<int, int>>& qf, int finalBo, int* reach) {
         for (int i = 0; i < 8; ++i) reach[i] = 0;
-        auto duel = [&](int a, int b, int bo) {
-            return play(slots[a], slots[b], bo) == slots[a] ? a : b;
-        };
+        auto duel = [&](int a, int b, int bo) { return play(slots[a], slots[b], bo) == slots[a] ? a : b; };
         int w[4];
         for (int q = 0; q < 4; ++q) {
             w[q] = duel(qf[q].first, qf[q].second, 3);
@@ -458,9 +577,9 @@ public:
         reach[duel(std::min(f1, f2), std::max(f1, f2), finalBo)] = 3;
     }
 
-    // Simula a cadeia de estágios: vagas TBD de um estágio recebem os classificados
-    // do anterior (ordenados por campanha, Buchholz e seed). Para o último estágio
-    // grava a categoria de cada time (swiss 0..5, playoffs 0..3) e a posição ocupada.
+    // Cadeia de estágios: vagas TBD recebem os classificados do estágio anterior
+    // (ordenados por campanha, Buchholz e seed). Grava a categoria de cada time no
+    // último estágio (swiss 0..5, playoffs 0..3) e a posição ocupada.
     void chain(const std::vector<ChainStage>& stages, const std::string& boRule, int finalBo, uint8_t* cat,
                int8_t* slotOf) {
         std::vector<int> carry, W, L, B;
@@ -593,8 +712,7 @@ double numOr(const json& j, const char* key, double def = 0) {
     return def;
 }
 
-// Força de cada time do universo (Elo + prior HLTV + jogadores + cenário) e
-// informações exibidas no site.
+// Força de cada time do universo e a decomposição por fator (exibida no site).
 void buildTeams(Engine& eng, const Dataset& data, const std::vector<std::string>& names, const json& sc,
                 const std::vector<std::string>& pool, SimModel& M, json& teamsJ, json& warnings) {
     const Params& P = eng.P;
@@ -664,26 +782,40 @@ void buildTeams(Engine& eng, const Dataset& data, const std::vector<std::string>
         else lineupSource = "desconhecida";
 
         json pj = json::array();
-        double sum = 0;
+        PlayerAgg agg;
+        if (!lineup.empty()) agg.rating = agg.kd = agg.adr = agg.kast = 0;
         for (auto& nick : lineup) {
-            double r, kd, nn;
-            eng.playerShrunk(nick, r, kd, nn);
+            PlayerState ps;
+            eng.playerShrunk(nick, ps);
             auto cp = curPlayers.find(playerKey(nick));
             int curMaps = 0;
             if (cp != curPlayers.end() && cp->second->maps > 0) {
                 curMaps = cp->second->maps;
                 double wc = curMaps / (curMaps + 15.0);
-                if (cp->second->rating > 0) r = wc * cp->second->rating + (1 - wc) * r;
-                if (cp->second->kd > 0) kd = wc * cp->second->kd + (1 - wc) * kd;
+                if (cp->second->rating > 0) ps.rating = wc * cp->second->rating + (1 - wc) * ps.rating;
+                if (cp->second->kd > 0) ps.kd = wc * cp->second->kd + (1 - wc) * ps.kd;
             }
-            double c = eng.composite(r, kd);
-            sum += c;
-            pj.push_back({{"name", nick}, {"rating", r}, {"kd", kd}, {"partidasHistorico", nn},
-                          {"mapasRecentes", curMaps}, {"indice", c}});
+            agg.rating += ps.rating;
+            agg.kd += ps.kd;
+            agg.adr += ps.adr;
+            agg.kast += ps.kast;
+            pj.push_back({{"name", nick}, {"rating", ps.rating}, {"kd", ps.kd}, {"adr", ps.adr}, {"kast", ps.kast},
+                          {"partidasHistorico", ps.n}, {"mapasRecentes", curMaps}});
         }
-        double pi = lineup.empty() ? 0 : sum / static_cast<double>(lineup.size());
+        if (!lineup.empty()) {
+            double ln = static_cast<double>(lineup.size());
+            agg.rating /= ln;
+            agg.kd /= ln;
+            agg.adr /= ln;
+            agg.kast /= ln;
+        }
+        double fRating = P.wRating * (agg.rating - 1), fKD = P.wKD * (agg.kd - 1);
+        double fADR = P.wADR * (agg.adr / ADR_BASE - 1), fKAST = P.wKAST * (agg.kast / KAST_BASE - 1);
+        double bonus = fRating + fKD + fADR + fKAST;
+        double fRest = P.wRust * eng.restScore(s, day);
+        double fSyn = P.wSyn * eng.stability(s, day);
         double adj = adjust.count(k) ? adjust[k] : 0;
-        double rating = base + P.beta * pi + adj;
+        double rating = base + bonus + s.form + fRest + fSyn + adj;
 
         std::vector<double> offs;
         json mapsJ = json::object();
@@ -700,21 +832,44 @@ void buildTeams(Engine& eng, const Dataset& data, const std::vector<std::string>
         if (s.n < 10)
             warnings.push_back(display + ": poucos mapas no historico (" + std::to_string(static_cast<int>(s.n)) + ")");
 
+        json fatores = {{"elo", s.r},
+                        {"ajustePrior", base - s.r},
+                        {"rating", fRating},
+                        {"kd", fKD},
+                        {"adr", fADR},
+                        {"kast", fKAST},
+                        {"forma", s.form},
+                        {"descanso", fRest},
+                        {"entrosamento", fSyn},
+                        {"cenario", adj}};
+        json medias = {{"rating", agg.rating}, {"kd", agg.kd}, {"adr", agg.adr}, {"kast", agg.kast}};
+        int daysOff = s.lastPlayed < 0 ? -1 : day - s.lastPlayed;
+        int daysChange = s.lastChange < -100000 ? -1 : day - s.lastChange;
         teamsJ.push_back({{"name", display},
+                          {"key", k},
                           {"rating", rating},
                           {"elo", s.r},
                           {"prior", hasPrior ? json(prior) : json(nullptr)},
                           {"pesoPrior", w},
                           {"pontosHLTV", points[i]},
-                          {"indiceJogadores", pi},
-                          {"bonusJogadores", P.beta * pi},
+                          {"bonusJogadores", bonus},
                           {"ajusteCenario", adj},
                           {"mapasNoHistorico", s.n},
                           {"incerteza", M.sigma.back()},
+                          {"diasSemJogar", daysOff},
+                          {"diasDesdeTroca", daysChange},
                           {"lineupFonte", lineupSource},
                           {"jogadores", pj},
+                          {"medias", medias},
+                          {"fatores", fatores},
                           {"mapas", mapsJ}});
     }
+    // confronto direto entre todos os pares do universo
+    for (size_t i = 0; i < n; ++i)
+        for (size_t j = i + 1; j < n; ++j) {
+            double h = eng.h2h(teamKey(names[i]), teamKey(names[j]), day);
+            if (std::abs(h) > 0.01) M.h2h[{static_cast<int>(i), static_cast<int>(j)}] = h;
+        }
 }
 
 const char* stageStatus(const StageInfo& s, int& known, int& played, int& pending) {
@@ -732,6 +887,24 @@ const char* stageStatus(const StageInfo& s, int& known, int& played, int& pendin
     if (played > 0 || pending > 0) return "em andamento";
     if (known < s.size) return "aguardando times";
     return "nao comecou";
+}
+
+std::vector<std::string> resolvePool(const json& req, const std::vector<std::string>& fallback) {
+    std::vector<std::string> raw;
+    if (req.contains("pool") && req["pool"].is_array() && !req["pool"].empty()) {
+        for (auto& x : req["pool"])
+            if (x.is_string()) raw.push_back(x.get<std::string>());
+    } else {
+        raw = fallback;
+    }
+    std::vector<std::string> pool;
+    for (auto& m : raw) {
+        std::string k = mapKey(m);
+        if (!k.empty() && std::find(pool.begin(), pool.end(), k) == pool.end()) pool.push_back(k);
+    }
+    if (pool.empty()) pool = DEFAULT_POOL;
+    if (pool.size() < 5) throw std::runtime_error("o map pool precisa de pelo menos 5 mapas");
+    return pool;
 }
 
 }  // namespace
@@ -782,7 +955,6 @@ json predictEvent(const Engine& trained, const Dataset& data, const json& req) {
                                                                                : static_cast<uint64_t>(std::random_device{}());
     json sc = (req.contains("scenario") && req["scenario"].is_object()) ? req["scenario"] : json::object();
 
-    // universo de times (todos os estágios da cadeia)
     std::vector<std::string> names;
     std::map<std::string, int> index;
     auto idOf = [&](const std::string& n) -> int {
@@ -797,14 +969,13 @@ json predictEvent(const Engine& trained, const Dataset& data, const json& req) {
     };
 
     std::vector<ChainStage> chain;
-    std::vector<std::array<int, 3>> knownResults;  // playoffs: a, b, vencedor
-    std::map<int, int> targetSeed;                 // time -> seed no estágio alvo
-    std::vector<std::string> poolRaw;
+    std::vector<std::array<int, 3>> knownResults;
+    std::map<int, int> targetSeed;
+    std::vector<std::string> poolFallback;
     json out = json::object();
 
     std::string eventName = strOr(req, "event");
     if (!eventName.empty()) {
-        // ---------------- estágio de um evento real
         const EventInfo* ev = nullptr;
         for (auto& e : data.events)
             if (e.name == eventName) ev = &e;
@@ -876,12 +1047,7 @@ json predictEvent(const Engine& trained, const Dataset& data, const json& req) {
         const StageInfo& tg = ev->stages[target];
         for (auto& t : tg.teams)
             if (!t.name.empty()) targetSeed[idOf(t.name)] = t.seed;
-        if (req.contains("pool") && req["pool"].is_array() && !req["pool"].empty()) {
-            for (auto& x : req["pool"])
-                if (x.is_string()) poolRaw.push_back(x.get<std::string>());
-        } else {
-            poolRaw = ev->pool;
-        }
+        poolFallback = ev->pool;
         json chainJ = json::array();
         for (auto& c : chain) chainJ.push_back(c.name);
         out["modo"] = "evento";
@@ -889,7 +1055,6 @@ json predictEvent(const Engine& trained, const Dataset& data, const json& req) {
         out["estagio"] = tg.name;
         out["cadeia"] = chainJ;
     } else {
-        // ---------------- lista manual
         std::string format = util::lower(strOr(req, "format", "swiss"));
         if (format != "swiss" && format != "playoffs") throw std::runtime_error("format deve ser 'swiss' ou 'playoffs'");
         size_t need = format == "playoffs" ? 8 : 16;
@@ -918,31 +1083,19 @@ json predictEvent(const Engine& trained, const Dataset& data, const json& req) {
         }
         if (!cs.swiss) cs.qf = {{0, 7}, {3, 4}, {1, 6}, {2, 5}};
         chain.push_back(cs);
-        if (req.contains("pool") && req["pool"].is_array())
-            for (auto& x : req["pool"])
-                if (x.is_string()) poolRaw.push_back(x.get<std::string>());
         out["modo"] = "manual";
         out["cadeia"] = json::array({"Personalizado"});
     }
+    std::vector<std::string> pool = resolvePool(req, poolFallback);
 
-    // map pool
-    std::vector<std::string> pool;
-    for (auto& m : poolRaw) {
-        std::string k = mapKey(m);
-        if (!k.empty() && std::find(pool.begin(), pool.end(), k) == pool.end()) pool.push_back(k);
-    }
-    if (pool.empty()) pool = DEFAULT_POOL;
-    if (pool.size() < 5) throw std::runtime_error("o map pool precisa de pelo menos 5 mapas");
-
-    // força dos times
     SimModel M;
     json teamsJ, warnings = json::array();
     buildTeams(eng, data, names, sc, pool, M, teamsJ, warnings);
     for (auto& kr : knownResults) M.forced[{std::min(kr[0], kr[1]), std::max(kr[0], kr[1])}] = kr[2];
     if (sc.contains("force") && sc["force"].is_array())
         for (auto& f : sc["force"]) {
-            auto look = [&](const std::string& n) {
-                auto it = index.find(teamKey(n));
+            auto look = [&](const std::string& nm) {
+                auto it = index.find(teamKey(nm));
                 return it == index.end() ? -1 : it->second;
             };
             int ia = look(strOr(f, "a")), ib = look(strOr(f, "b")), iw = look(strOr(f, "winner"));
@@ -1011,7 +1164,6 @@ json predictEvent(const Engine& trained, const Dataset& data, const json& req) {
     out["teams"] = teamsOut;
 
     if (playoffsTarget) {
-        // chave: times conhecidos ou, se ainda TBD, o ocupante mais provável de cada posição
         const ChainStage& cs = chain.back();
         std::vector<int> occ(8, -1);
         std::vector<double> occP(8, 1.0);
@@ -1047,12 +1199,12 @@ json predictEvent(const Engine& trained, const Dataset& data, const json& req) {
         out["chave"] = bracket;
         out["chaveDefinida"] = cs.slotsKnown;
         json occJ = json::array();
-        for (int pos = 0; pos < 8; ++pos) occJ.push_back({{"pos", pos + 1}, {"team", teamsJ[occ[pos]]["name"]}, {"prob", occP[pos]}});
+        for (int pos = 0; pos < 8; ++pos)
+            occJ.push_back({{"pos", pos + 1}, {"team", teamsJ[occ[pos]]["name"]}, {"prob", occP[pos]}});
         out["ocupantes"] = occJ;
         return out;
     }
 
-    // ---------------- Pick'Em do Swiss
     if (cand.size() < 10) throw std::runtime_error("menos de 10 times possiveis no estagio");
     Picks pk = optimizePicks(dist, cand, cats, NT, static_cast<size_t>(sims), adv30);
     double p5, eh;
@@ -1067,6 +1219,114 @@ json predictEvent(const Engine& trained, const Dataset& data, const json& req) {
     out["p5"] = p5;
     out["acertosEsperados"] = eh;
     return out;
+}
+
+// ============================================================================
+// Comparação de dois times
+// ============================================================================
+json compareTeams(const Engine& trained, const Dataset& data, const json& req) {
+    Engine eng = trained;
+    std::string a = util::trim(strOr(req, "a")), b = util::trim(strOr(req, "b"));
+    if (a.empty() || b.empty()) throw std::runtime_error("informe os dois times");
+    if (teamKey(a) == teamKey(b)) throw std::runtime_error("escolha dois times diferentes");
+    int bo = static_cast<int>(numOr(req, "bo", 3));
+    if (bo != 1 && bo != 3 && bo != 5) bo = 3;
+
+    std::vector<std::string> fallback;
+    std::string eventName = strOr(req, "event");
+    for (auto& e : data.events)
+        if (e.name == eventName) fallback = e.pool;
+    std::vector<std::string> pool = resolvePool(req, fallback);
+
+    SimModel M;
+    json teamsJ, warnings = json::array();
+    buildTeams(eng, data, {a, b}, json::object(), pool, M, teamsJ, warnings);
+    Simulator sim(M, 1);
+    sim.meanRatings();
+
+    // séries: média de A começando o veto e B começando
+    json series = json::object();
+    for (int s : {1, 3, 5}) {
+        double p = 0.5 * (sim.probFor(0, 1, s) + (1 - sim.probFor(1, 0, s)));
+        series["bo" + std::to_string(s)] = p;
+    }
+
+    // mapas
+    std::vector<double> adv = sim.advantages(0, 1);
+    json mapsJ = json::array();
+    for (size_t m = 0; m < pool.size(); ++m)
+        mapsJ.push_back({{"map", pool[m]},
+                         {"offA", M.off[0][m]},
+                         {"offB", M.off[1][m]},
+                         {"pA", elo2p(adv[m])}});
+
+    // veto previsto (A começa)
+    std::vector<int> order;
+    std::vector<VetoStep> steps;
+    vetoOrder(adv, bo, order, &steps);
+    json passos = json::array();
+    for (auto& st : steps)
+        passos.push_back({{"time", st.byA ? teamsJ[0]["name"] : teamsJ[1]["name"]},
+                          {"acao", st.ban ? "ban" : "pick"},
+                          {"mapa", pool[st.map]}});
+    json jogados = json::array();
+    for (size_t i = 0; i < static_cast<size_t>(bo) && i < order.size(); ++i)
+        jogados.push_back({{"map", pool[order[i]]}, {"pA", elo2p(adv[order[i]])},
+                           {"decider", i + 1 == order.size() || static_cast<int>(i) == bo - 1}});
+
+    // fatores lado a lado (pontos de Elo)
+    static const std::vector<std::pair<const char*, const char*>> FACT = {
+        {"elo", "Elo historico"},          {"ajustePrior", "Ranking HLTV (prior)"},
+        {"rating", "Rating dos jogadores"}, {"kd", "K/D dos jogadores"},
+        {"adr", "ADR dos jogadores"},       {"kast", "KAST dos jogadores"},
+        {"forma", "Forma recente"},         {"descanso", "Descanso / inatividade"},
+        {"entrosamento", "Entrosamento"}};
+    json fatores = json::array();
+    for (auto& f : FACT) {
+        double va = teamsJ[0]["fatores"][f.first].get<double>();
+        double vb = teamsJ[1]["fatores"][f.first].get<double>();
+        fatores.push_back({{"chave", f.first}, {"nome", f.second}, {"a", va}, {"b", vb}, {"diff", va - vb}});
+    }
+    double h = sim.h2hFor(0, 1);
+    fatores.push_back({{"chave", "h2h"}, {"nome", "Confronto direto"}, {"a", h}, {"b", -h}, {"diff", h}});
+
+    // histórico: recentes e confronto direto
+    std::string ka = teamKey(a), kb = teamKey(b);
+    auto summarize = [&](const Match& m, const std::string& me) {
+        bool first = teamKey(m.team1) == me;
+        int won = 0, lost = 0;
+        for (auto& mp : m.maps) {
+            bool w1 = mp.r1 > mp.r2;
+            if (w1 == first) ++won; else ++lost;
+        }
+        std::string placar = m.maps.size() == 1
+                                 ? std::to_string(first ? m.maps[0].r1 : m.maps[0].r2) + "-" +
+                                       std::to_string(first ? m.maps[0].r2 : m.maps[0].r1)
+                                 : std::to_string(won) + "-" + std::to_string(lost);
+        return json{{"data", m.date}, {"evento", m.event}, {"adversario", first ? m.team2 : m.team1},
+                    {"placar", placar}, {"venceu", won > lost}};
+    };
+    json recA = json::array(), recB = json::array(), h2hHist = json::array();
+    for (auto it = data.matches.rbegin(); it != data.matches.rend(); ++it) {
+        std::string k1 = teamKey(it->team1), k2 = teamKey(it->team2);
+        bool hasA = k1 == ka || k2 == ka, hasB = k1 == kb || k2 == kb;
+        if (hasA && recA.size() < 10) recA.push_back(summarize(*it, ka));
+        if (hasB && recB.size() < 10) recB.push_back(summarize(*it, kb));
+        if (hasA && hasB && h2hHist.size() < 10) h2hHist.push_back(summarize(*it, ka));
+        if (recA.size() >= 10 && recB.size() >= 10 && h2hHist.size() >= 10) break;
+    }
+
+    return json{{"a", teamsJ[0]},
+                {"b", teamsJ[1]},
+                {"pool", pool},
+                {"bo", bo},
+                {"series", series},
+                {"fatores", fatores},
+                {"mapas", mapsJ},
+                {"veto", {{"passos", passos}, {"jogados", jogados}}},
+                {"h2h", {{"elo", h}, {"historico", h2hHist}}},
+                {"recentes", {{"a", recA}, {"b", recB}}},
+                {"avisos", warnings}};
 }
 
 // ============================================================================
@@ -1105,18 +1365,29 @@ json teamsOverview(const Engine& trained, const Dataset& data, int limit) {
         auto rk = rankMap.find(k);
         std::vector<std::string> lineup = rk != rankMap.end() && rk->second->lineup.size() >= 4 ? rk->second->lineup : s.lineup;
         json pj = json::array();
-        double sum = 0;
+        PlayerAgg agg;
+        if (!lineup.empty()) agg.rating = agg.kd = agg.adr = agg.kast = 0;
         for (auto& nick : lineup) {
-            double r, kd, nn;
-            trained.playerShrunk(nick, r, kd, nn);
+            PlayerState ps;
+            trained.playerShrunk(nick, ps);
             auto cp = curPlayers.find(playerKey(nick));
             if (cp != curPlayers.end() && cp->second->maps > 0) {
                 double wc = cp->second->maps / (cp->second->maps + 15.0);
-                if (cp->second->rating > 0) r = wc * cp->second->rating + (1 - wc) * r;
-                if (cp->second->kd > 0) kd = wc * cp->second->kd + (1 - wc) * kd;
+                if (cp->second->rating > 0) ps.rating = wc * cp->second->rating + (1 - wc) * ps.rating;
+                if (cp->second->kd > 0) ps.kd = wc * cp->second->kd + (1 - wc) * ps.kd;
             }
-            sum += trained.composite(r, kd);
-            pj.push_back({{"name", nick}, {"rating", r}, {"kd", kd}});
+            agg.rating += ps.rating;
+            agg.kd += ps.kd;
+            agg.adr += ps.adr;
+            agg.kast += ps.kast;
+            pj.push_back({{"name", nick}, {"rating", ps.rating}, {"kd", ps.kd}, {"adr", ps.adr}, {"kast", ps.kast}});
+        }
+        if (!lineup.empty()) {
+            double ln = static_cast<double>(lineup.size());
+            agg.rating /= ln;
+            agg.kd /= ln;
+            agg.adr /= ln;
+            agg.kast /= ln;
         }
         std::vector<std::pair<double, std::string>> offs;
         for (auto& o : s.off) offs.push_back({o.second, o.first});
@@ -1127,8 +1398,9 @@ json teamsOverview(const Engine& trained, const Dataset& data, int limit) {
                        {"rank", rk != rankMap.end() ? rk->second->rank : 0},
                        {"pontos", rk != rankMap.end() ? rk->second->points : 0.0},
                        {"elo", s.r},
+                       {"forma", s.form},
                        {"mapas", s.n},
-                       {"indiceJogadores", lineup.empty() ? 0.0 : sum / lineup.size()},
+                       {"bonusJogadores", lineup.empty() ? 0.0 : trained.playerBonus(agg)},
                        {"jogadores", pj},
                        {"mapPool", mapsJ}});
     }
@@ -1202,8 +1474,7 @@ json makeDemoImport() {
                                {"p1", lines(a, aWon)},
                                {"p2", lines(b, !aWon)}});
         }
-        // trocas de roster ocasionais
-        if (u(rng) < 0.02) {
+        if (u(rng) < 0.02) {  // trocas de roster ocasionais
             int t = static_cast<int>(u(rng) * NT);
             int p = static_cast<int>(u(rng) * 5);
             roster[t][p] = "demo_new" + std::to_string(d);

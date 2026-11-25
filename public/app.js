@@ -427,21 +427,26 @@ function warningsHtml(list) {
 
 function detailHtml(t) {
   const players = (t.jogadores || []).map((p) => `
-    <tr><td>${esc(p.name)}</td><td>${num(p.rating, 2)}</td><td>${num(p.kd, 2)}</td>
-    <td>${num(p.partidasHistorico, 0)}</td><td>${p.mapasRecentes || '–'}</td><td>${signed(p.indice * 100, 1)}</td></tr>`).join('');
+    <tr><td>${esc(p.name)}</td><td>${num(p.rating, 2)}</td><td>${num(p.kd, 2)}</td><td>${num(p.adr, 1)}</td><td>${num(p.kast, 1)}%</td>
+    <td>${num(p.partidasHistorico, 0)}</td><td>${p.mapasRecentes || '–'}</td></tr>`).join('');
+  const f = t.fatores || {};
+  const fRow = (label, v) => `<dt>${label}</dt><dd>${signed(v)}</dd>`;
   const maps = Object.entries(t.mapas || {}).sort((a, b) => b[1] - a[1]).map(([m, o]) => {
     const w = Math.min(50, (Math.abs(o) / 150) * 50);
     return `<div class="mapbar"><span>${esc(m)}</span><span class="track"><span class="fill ${o >= 0 ? 'pos' : 'neg'}" style="width:${w}%"></span></span><span class="n">${signed(o)}</span></div>`;
   }).join('');
   return `<div class="detail-grid">
     <div><h3>Jogadores · lineup: ${esc(t.lineupFonte)}</h3>
-      ${players ? `<table class="players"><tr><th>Nick</th><th>Rating</th><th>K/D</th><th>Hist.</th><th>90d</th><th>Índice</th></tr>${players}</table>` : '<p class="hint">Sem lineup conhecida.</p>'}
+      ${players ? `<table class="players"><tr><th>Nick</th><th>Rating</th><th>K/D</th><th>ADR</th><th>KAST</th><th>Hist.</th><th>90d</th></tr>${players}</table>` : '<p class="hint">Sem lineup conhecida.</p>'}
     </div>
-    <div><h3>Composição da força</h3><dl class="kv">
+    <div><h3>Composição da força (Elo)</h3><dl class="kv">
       <dt>Elo (histórico)</dt><dd>${num(t.elo)}</dd>
-      <dt>Prior ranking HLTV</dt><dd>${t.prior == null ? '–' : `${num(t.prior)} (${num(t.pontosHLTV)} pts, peso ${pct(t.pesoPrior, 0)})`}</dd>
-      <dt>Bônus jogadores</dt><dd>${signed(t.bonusJogadores)}</dd>
-      <dt>Ajuste do cenário</dt><dd>${signed(t.ajusteCenario)}</dd>
+      <dt>Ranking HLTV</dt><dd>${t.prior == null ? '–' : `${signed(f.ajustePrior)} (${num(t.pontosHLTV)} pts, peso ${pct(t.pesoPrior, 0)})`}</dd>
+      ${fRow('Rating dos jogadores', f.rating)}${fRow('K/D', f.kd)}${fRow('ADR', f.adr)}${fRow('KAST', f.kast)}
+      ${fRow('Forma recente', f.forma)}
+      <dt>Descanso</dt><dd>${signed(f.descanso)} (${t.diasSemJogar < 0 ? '?' : t.diasSemJogar} dias sem jogar)</dd>
+      <dt>Entrosamento</dt><dd>${signed(f.entrosamento)} (${t.diasDesdeTroca < 0 ? 'sem troca registrada' : `troca há ${t.diasDesdeTroca} dias`})</dd>
+      ${fRow('Ajuste do cenário', t.ajusteCenario)}
       <dt>Força final</dt><dd><b>${num(t.rating)}</b></dd>
       <dt>Incerteza (σ)</dt><dd>±${num(t.incerteza)}</dd>
       <dt>Mapas no histórico</dt><dd>${num(t.mapasNoHistorico)}</dd>
@@ -529,19 +534,110 @@ function renderResults(r) {
   attachDetails($('#resTable'), teams, chained ? 11 : 10);
 }
 
+// ============================================================ aba Comparar
+$('#cmpRun').addEventListener('click', runCompare);
+['#cmpA', '#cmpB'].forEach((s) => $(s).addEventListener('keydown', (e) => { if (e.key === 'Enter') runCompare(); }));
+
+async function runCompare() {
+  showErr('#cmpError', '');
+  const a = $('#cmpA').value.trim(), b = $('#cmpB').value.trim();
+  if (!a || !b) { showErr('#cmpError', 'Escolha os dois times.'); return; }
+  const btn = $('#cmpRun');
+  btn.disabled = true;
+  try {
+    const ev = state.mode === 'evento' ? currentEvent() : null;
+    const r = await api('/api/compare', { json: { a, b, bo: Number($('#cmpBo').value), pool: state.pool, event: ev ? ev.name : '' } });
+    renderCompare(r);
+  } catch (e) {
+    showErr('#cmpError', e.message);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+function renderCompare(r) {
+  const A = r.a, B = r.b;
+  const pBo = r.series[`bo${r.bo}`];
+  const maxAbs = Math.max(50, ...r.fatores.map((f) => Math.abs(f.diff)));
+  const fbar = (label, va, vb, diff, cls = '') => {
+    const w = Math.min(50, (Math.abs(diff) / maxAbs) * 50);
+    return `<div class="fbar ${cls}"><span>${label}</span><span class="v">${signed(va)}</span>
+      <span class="track"><span class="fill ${diff >= 0 ? 'a' : 'b'}" style="width:${w}%"></span></span><span class="v b">${signed(vb)}</span></div>`;
+  };
+  const totalDiff = A.rating - B.rating;
+  const statRow = (label, k, d = 2, suffix = '') => {
+    const va = A.medias[k], vb = B.medias[k];
+    return `<tr><td>${label}</td><td class="${va >= vb ? 'w' : ''}">${num(va, d)}${suffix}</td><td class="${vb > va ? 'w' : ''}">${num(vb, d)}${suffix}</td></tr>`;
+  };
+  const players = (t) => `<table class="players"><tr><th>${esc(t.name)}</th><th>Rating</th><th>K/D</th><th>ADR</th><th>KAST</th></tr>
+    ${t.jogadores.map((p) => `<tr><td>${esc(p.name)}</td><td>${num(p.rating, 2)}</td><td>${num(p.kd, 2)}</td><td>${num(p.adr, 1)}</td><td>${num(p.kast, 1)}%</td></tr>`).join('')}</table>`;
+  const results = (list) => list.length
+    ? `<ul class="res-list">${list.map((m) => `<li><span class="hint">${esc(m.data)}</span><span>${esc(m.adversario)} <span class="hint">· ${esc(m.evento)}</span></span><span class="${m.venceu ? 'W' : 'L'}">${esc(m.placar)}</span></li>`).join('')}</ul>`
+    : '<p class="hint">Sem partidas no histórico.</p>';
+
+  $('#cmpResult').innerHTML = `
+    <div class="card">
+      <div class="vs-head">
+        <div class="vs-team">${esc(A.name)}<small>força ${num(A.rating)} · ${A.pontosHLTV ? `${num(A.pontosHLTV)} pts HLTV` : 'sem ranking'}</small></div>
+        <div class="vs-mid">Bo${r.bo}</div>
+        <div class="vs-team b">${esc(B.name)}<small>força ${num(B.rating)} · ${B.pontosHLTV ? `${num(B.pontosHLTV)} pts HLTV` : 'sem ranking'}</small></div>
+      </div>
+      <div class="duel-bar"><div class="da" style="width:${(pBo * 100).toFixed(1)}%">${pct(pBo)}</div><div class="db" style="width:${((1 - pBo) * 100).toFixed(1)}%">${pct(1 - pBo)}</div></div>
+      <div class="series-row"><span>Bo1 <b>${pct(r.series.bo1)}</b></span><span>Bo3 <b>${pct(r.series.bo3)}</b></span><span>Bo5 <b>${pct(r.series.bo5)}</b></span><span>(chance de ${esc(A.name)})</span></div>
+      ${warningsHtml(r.avisos)}
+    </div>
+
+    <div class="card">
+      <h2>Fatores (pontos de Elo)</h2>
+      <p class="hint">Barra para a esquerda favorece ${esc(A.name)}; para a direita, ${esc(B.name)}.</p>
+      ${r.fatores.map((f) => fbar(esc(f.nome), f.a, f.b, f.diff)).join('')}
+      ${fbar('Total (força final)', A.rating, B.rating, totalDiff, 'total')}
+    </div>
+
+    <div class="cmp-grid">
+      <div class="card">
+        <h2>Estatísticas médias da lineup</h2>
+        <table class="players"><tr><th></th><th>${esc(A.name)}</th><th>${esc(B.name)}</th></tr>
+          ${statRow('Rating', 'rating')}${statRow('K/D', 'kd')}${statRow('ADR', 'adr', 1)}${statRow('KAST', 'kast', 1, '%')}
+          <tr><td>Dias sem jogar</td><td>${A.diasSemJogar < 0 ? '?' : A.diasSemJogar}</td><td>${B.diasSemJogar < 0 ? '?' : B.diasSemJogar}</td></tr>
+          <tr><td>Última troca</td><td>${A.diasDesdeTroca < 0 ? '—' : `${A.diasDesdeTroca} d`}</td><td>${B.diasDesdeTroca < 0 ? '—' : `${B.diasDesdeTroca} d`}</td></tr>
+          <tr><td>Mapas no histórico</td><td>${num(A.mapasNoHistorico)}</td><td>${num(B.mapasNoHistorico)}</td></tr>
+        </table>
+        <h3>Jogadores</h3>${players(A)}<br>${players(B)}
+      </div>
+      <div class="card">
+        <h2>Mapas</h2>
+        <table class="players"><tr><th>Mapa</th><th>${esc(A.name)}</th><th>${esc(B.name)}</th><th>Chance ${esc(A.name)}</th></tr>
+          ${r.mapas.slice().sort((x, y) => y.pA - x.pA).map((m) => `<tr><td style="text-transform:capitalize">${esc(m.map)}</td><td>${signed(m.offA)}</td><td>${signed(m.offB)}</td><td>${pct(m.pA)}</td></tr>`).join('')}
+        </table>
+        <h3>Veto previsto (${esc(A.name)} começa)</h3>
+        <ol class="veto-list">${r.veto.passos.map((s) => `<li class="${s.acao}">${esc(s.time)} ${s.acao === 'ban' ? 'bane' : 'escolhe'} <b>${esc(s.mapa)}</b></li>`).join('')}</ol>
+        <h3>Mapas jogados</h3>
+        <ol class="veto-list">${r.veto.jogados.map((m) => `<li class="pick">${esc(m.map)}${m.decider ? ' (decider)' : ''} — ${esc(A.name)} ${pct(m.pA)}</li>`).join('')}</ol>
+      </div>
+    </div>
+
+    <div class="cmp-grid">
+      <div class="card"><h2>Confronto direto</h2>
+        <p class="hint">Efeito no modelo: ${signed(r.h2h.elo)} Elo para ${esc(A.name)}.</p>${results(r.h2h.historico)}</div>
+      <div class="card"><h2>Últimos jogos</h2>
+        <h3>${esc(A.name)}</h3>${results(r.recentes.a)}<h3>${esc(B.name)}</h3>${results(r.recentes.b)}</div>
+    </div>`;
+}
+
 // ============================================================ aba Times
 async function loadTeams() {
   const table = $('#teamsTable');
   try {
     const teams = await api('/api/teams?limit=60');
     if (!teams.length) { table.innerHTML = '<tr><td class="hint">Sem dados ainda. Veja a aba Dados.</td></tr>'; return; }
-    table.innerHTML = `<tr><th class="num">#</th><th>Time</th><th class="num">Pontos</th><th class="num">Elo</th><th class="num">Mapas</th><th class="num">Índ. jog.</th><th>Lineup (rating · K/D)</th><th>Melhor mapa</th><th>Pior mapa</th></tr>
+    table.innerHTML = `<tr><th class="num">#</th><th>Time</th><th class="num">Pontos</th><th class="num">Elo</th><th class="num">Forma</th><th class="num">Mapas</th><th class="num">Bônus jog.</th><th>Lineup (rating · K/D · ADR)</th><th>Melhor mapa</th><th>Pior mapa</th></tr>
       ${teams.map((t) => {
         const best = t.mapPool[0];
         const worst = t.mapPool[t.mapPool.length - 1];
         return `<tr><td class="num">${t.rank || '–'}</td><td class="team-name">${esc(t.name)}</td><td class="num">${t.pontos ? num(t.pontos) : '–'}</td>
-          <td class="num">${num(t.elo)}</td><td class="num">${num(t.mapas)}</td><td class="num">${signed(t.indiceJogadores * 100, 1)}</td>
-          <td class="lineup-chips">${t.jogadores.map((p) => `<span class="tag"><b>${esc(p.name)}</b> ${num(p.rating, 2)} · ${num(p.kd, 2)}</span>`).join('')}</td>
+          <td class="num">${num(t.elo)}</td><td class="num">${signed(t.forma)}</td><td class="num">${num(t.mapas)}</td><td class="num">${signed(t.bonusJogadores)}</td>
+          <td class="lineup-chips">${t.jogadores.map((p) => `<span class="tag"><b>${esc(p.name)}</b> ${num(p.rating, 2)} · ${num(p.kd, 2)} · ${num(p.adr, 0)}</span>`).join('')}</td>
           <td>${best ? `${esc(best.map)} <span class="hint">${signed(best.offset)}</span>` : '–'}</td>
           <td>${worst && t.mapPool.length > 1 ? `${esc(worst.map)} <span class="hint">${signed(worst.offset)}</span>` : '–'}</td></tr>`;
       }).join('')}`;
@@ -575,16 +671,30 @@ function renderTrain(t) {
     <div class="metric-grid">
       ${metric('Log-loss', num(t.depois.logloss, 4), `antes ${num(t.antes.logloss, 4)} · 50/50 = 0.6931`)}
       ${metric('Acerto por mapa', pct(t.depois.acc), `${t.depois.count} mapas avaliados`)}
-      ${metric('Sem stats de jogador', num(t.semJogadores.logloss, 4), 'log-loss só com Elo')}
+      ${metric('Brier (erro²)', num(t.depois.brier, 4), `só Elo: ${num(t.semJogadores.logloss, 4)} log-loss`)}
     </div>
+    <h3>Margem de erro (calibração)</h3>
+    <p class="hint">Quando o modelo deu X% para um time, quantas vezes ele ganhou de fato (mapas da validação). Quanto mais perto as duas colunas, menor o erro.</p>
+    <table class="calib"><tr><th>Faixa</th><th>Previsto</th><th>Real</th><th>Erro</th><th>Mapas</th></tr>
+      ${(t.depois.calib || []).map((c) => `<tr><td>${pct(Math.floor(c[0] * 10) / 10, 0)}–${pct(Math.floor(c[0] * 10) / 10 + 0.1, 0)}</td><td>${pct(c[0])}</td><td>${pct(c[1])}</td><td>${signed((c[1] - c[0]) * 100, 1)} pp</td><td>${c[2]}</td></tr>`).join('')}
+    </table>
+    <h3>Importância dos fatores</h3>
+    <p class="hint">Quanto o log-loss da validação piora ao desligar cada fator (maior = mais importante; ≤ 0 = não ajudou nesses dados).</p>
+    <table class="calib"><tr><th style="text-align:left">Fator</th><th>Piora</th><th>Acerto sem ele</th></tr>
+      ${(t.importancia || []).slice().sort((a, b) => b.piora - a.piora).map((a) => `<tr><td style="text-align:left">${esc(a.fator)}</td><td>${a.piora > 0 ? '+' : ''}${num(a.piora, 4)}</td><td>${pct(a.acertoSem)}</td></tr>`).join('')}
+    </table>
+    <h3>Pesos aprendidos</h3>
     <dl class="kv">
       <dt>K geral / K mapa</dt><dd>${num(p.k, 1)} / ${num(p.kmap, 1)}</dd>
       <dt>Margem de rounds</dt><dd>${num(p.margin, 2)}</dd>
       <dt>Memória (tau)</dt><dd>${num(p.tau)} dias</dd>
       <dt>Troca de roster</dt><dd>${pct(p.roster)} por jogador</dd>
-      <dt>Peso dos jogadores (β)</dt><dd>${num(p.beta)} Elo</dd>
-      <dt>Mistura rating × K/D</dt><dd>${pct(1 - p.kdMix, 0)} rating · ${pct(p.kdMix, 0)} K/D</dd>
-      <dt>Velocidade da forma</dt><dd>${num(p.playerAlpha, 2)}</dd>
+      <dt>Rating / K/D / ADR / KAST</dt><dd>${num(p.wRating)} / ${num(p.wKD)} / ${num(p.wADR)} / ${num(p.wKAST)} Elo</dd>
+      <dt>Ajuste pelo adversário</dt><dd>${num(p.gamma, 2)}</dd>
+      <dt>Forma recente</dt><dd>K ${num(p.kForm, 1)} · memória ${num(p.tauForm)} dias</dd>
+      <dt>Confronto direto</dt><dd>K ${num(p.kH2H, 1)}</dd>
+      <dt>Descanso / entrosamento</dt><dd>${num(p.wRust, 1)} / ${num(p.wSyn, 1)} Elo</dd>
+      <dt>Média móvel dos jogadores</dt><dd>${num(p.playerAlpha, 2)}</dd>
     </dl>`;
 }
 

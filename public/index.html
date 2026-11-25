@@ -18,6 +18,7 @@
     </div>
     <nav class="tabs" role="tablist">
       <button class="tab active" data-tab="predict" role="tab">Previsão</button>
+      <button class="tab" data-tab="compare" role="tab">Comparar</button>
       <button class="tab" data-tab="teams" role="tab">Times</button>
       <button class="tab" data-tab="data" role="tab">Dados</button>
     </nav>
@@ -122,6 +123,24 @@
       </div>
 
       <div id="results"></div>
+    </section>
+
+    <!-- =============================== COMPARAR =============================== -->
+    <section id="tab-compare" class="panel">
+      <div class="card">
+        <h2>Comparar times</h2>
+        <div class="cmp-form">
+          <label class="field">Time A<input id="cmpA" list="teamList" placeholder="ex.: Vitality"></label>
+          <label class="field">Time B<input id="cmpB" list="teamList" placeholder="ex.: MOUZ"></label>
+          <label class="field">Série
+            <select id="cmpBo"><option value="1">Bo1</option><option value="3" selected>Bo3</option><option value="5">Bo5</option></select>
+          </label>
+          <button class="btn primary" id="cmpRun">Comparar</button>
+        </div>
+        <p class="hint">Usa o map pool da aba Previsão (e o da Major selecionada). Todos os fatores estão em pontos de Elo: +100 ≈ 64% de chance por mapa.</p>
+        <div id="cmpError" class="error" hidden></div>
+      </div>
+      <div id="cmpResult"></div>
     </section>
 
     <!-- =============================== TIMES =============================== -->

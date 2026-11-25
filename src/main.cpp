@@ -325,6 +325,24 @@ int main() {
         }
     });
 
+    svr.Post("/api/compare", [](const httplib::Request& req, httplib::Response& res) {
+        std::shared_ptr<const Engine> eng;
+        std::shared_ptr<const Dataset> data;
+        {
+            std::lock_guard<std::mutex> g(app.mu);
+            eng = app.engine;
+            data = app.data;
+        }
+        if (!eng || !data) return sendJson(res, {{"error", "modelo ainda nao esta pronto"}}, 503);
+        try {
+            sendJson(res, compareTeams(*eng, *data, parseBody(req)));
+        } catch (const json::exception& e) {
+            sendJson(res, {{"error", std::string("JSON invalido: ") + e.what()}}, 400);
+        } catch (const std::runtime_error& e) {
+            sendJson(res, {{"error", e.what()}}, 400);
+        }
+    });
+
     svr.Post("/api/pipeline", [](const httplib::Request& req, httplib::Response& res) {
         if (!authorized(req, res)) return;
         json b = parseBody(req);
