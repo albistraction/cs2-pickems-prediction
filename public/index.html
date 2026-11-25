@@ -1,0 +1,178 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Pickems Prediction</title>
+  <meta name="description" content="Previsão estatística do Pick'Em das Majors de CS2: Elo por mapa, estatísticas dos jogadores e simulação Monte Carlo.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="top">
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true"></span>
+      <span class="brand-name">PICKEMS<span>PREDICTION</span></span>
+    </div>
+    <nav class="tabs" role="tablist">
+      <button class="tab active" data-tab="predict" role="tab">Previsão</button>
+      <button class="tab" data-tab="teams" role="tab">Times</button>
+      <button class="tab" data-tab="data" role="tab">Dados</button>
+    </nav>
+    <div id="statusChip" class="chip" title="Status do modelo">…</div>
+  </header>
+
+  <main>
+    <!-- =============================== PREVISÃO =============================== -->
+    <section id="tab-predict" class="panel active">
+      <div class="grid-2">
+        <div class="card">
+          <div class="card-head">
+            <h2>Estágio</h2>
+            <div class="seg" id="formatSeg">
+              <button data-format="swiss" class="on">Swiss · 16</button>
+              <button data-format="playoffs">Playoffs · 8</button>
+            </div>
+          </div>
+          <p class="hint" id="seedHint">Ordem = seed. Na rodada 1 do Swiss joga 1×9, 2×10…</p>
+          <div class="row-actions">
+            <button class="btn ghost" id="fillRanking">Preencher com ranking HLTV</button>
+            <button class="btn ghost" id="clearTeams">Limpar</button>
+          </div>
+          <div id="teamRows" class="team-rows"></div>
+          <datalist id="teamList"></datalist>
+        </div>
+
+        <div class="stack">
+          <div class="card">
+            <h2>Configuração</h2>
+            <label class="field">Map pool
+              <div id="poolChips" class="chips"></div>
+            </label>
+            <div class="fields-2">
+              <label class="field">Regra de Bo (Swiss)
+                <select id="boRule">
+                  <option value="valve">Valve (Bo3 em classificação/eliminação)</option>
+                  <option value="bo1">Tudo Bo1</option>
+                  <option value="bo3">Tudo Bo3</option>
+                </select>
+              </label>
+              <label class="field">Final (Playoffs)
+                <select id="finalBo">
+                  <option value="3">Bo3</option>
+                  <option value="5">Bo5</option>
+                </select>
+              </label>
+              <label class="field">Simulações
+                <select id="sims">
+                  <option value="20000">20 mil (rápido)</option>
+                  <option value="50000" selected>50 mil</option>
+                  <option value="100000">100 mil</option>
+                  <option value="200000">200 mil (lento)</option>
+                </select>
+              </label>
+              <label class="field check">
+                <input type="checkbox" id="adv30"> Pick “avança” também vale se o time fizer 3-0
+              </label>
+            </div>
+          </div>
+
+          <div class="card">
+            <h2>Cenários</h2>
+            <p class="hint">Ajuste de força (Elo) e lineup ficam na linha de cada time. Aqui: resultados já conhecidos/hipotéticos e ajustes por mapa.</p>
+            <h3>Resultados forçados</h3>
+            <div id="forceRows" class="mini-rows"></div>
+            <button class="btn ghost sm" id="addForce">+ resultado</button>
+            <h3>Ajuste por mapa</h3>
+            <div id="mapadjRows" class="mini-rows"></div>
+            <button class="btn ghost sm" id="addMapadj">+ ajuste de mapa</button>
+          </div>
+
+          <button class="btn primary big" id="runPredict">Calcular previsão</button>
+          <div id="predictError" class="error" hidden></div>
+        </div>
+      </div>
+
+      <div id="results"></div>
+    </section>
+
+    <!-- =============================== TIMES =============================== -->
+    <section id="tab-teams" class="panel">
+      <div class="card">
+        <div class="card-head">
+          <h2>Times — força atual</h2>
+          <button class="btn ghost sm" id="reloadTeams">Atualizar</button>
+        </div>
+        <p class="hint">Elo por mapa (decaído até hoje) + índice dos jogadores (rating HLTV e K/D, média móvel do histórico misturada às stats dos últimos 90 dias).</p>
+        <div class="table-wrap"><table class="tbl" id="teamsTable"></table></div>
+      </div>
+    </section>
+
+    <!-- =============================== DADOS =============================== -->
+    <section id="tab-data" class="panel">
+      <div class="grid-2">
+        <div class="stack">
+          <div class="card">
+            <h2>Pipeline</h2>
+            <div class="status-line"><span id="phase" class="phase">…</span><span id="phaseMsg"></span></div>
+            <div class="progress"><div id="progressBar"></div></div>
+            <dl class="kv" id="dataKv"></dl>
+            <div class="row-actions wrap">
+              <button class="btn" id="btnCurate">Curar + treinar</button>
+              <button class="btn ghost" id="btnStop">Parar</button>
+            </div>
+            <div class="row-actions wrap">
+              <button class="btn ghost sm" id="btnDemo">Carregar dados demo</button>
+              <button class="btn ghost sm" id="btnDemoRemove">Remover dados demo</button>
+            </div>
+            <label class="field" id="tokenField">Token de administrador
+              <input type="password" id="adminToken" placeholder="ADMIN_TOKEN do Railway" autocomplete="off">
+            </label>
+            <div id="dataError" class="error" hidden></div>
+          </div>
+
+          <div class="card">
+            <h2>Coletor local</h2>
+            <p class="hint">A HLTV bloqueia servidores, então a coleta roda no seu PC: a pasta <code>coletor-local</code> do projeto abre a HLTV num navegador, percorre as últimas Majors, partidas (K/D, rating), ranking e stats, e envia tudo para cá. Quando a Cloudflare pedir verificação, você resolve na janela e ele continua.</p>
+            <ol class="hint steps">
+              <li>Instale o Node.js e dê dois cliques em <code>instalar.bat</code>.</li>
+              <li>Dois cliques em <code>coletar.bat</code> → informe a URL deste site e o token.</li>
+              <li><b>Coleta completa</b> na primeira vez; <b>Só dados atuais</b> antes de cada Major.</li>
+            </ol>
+          </div>
+
+          <div class="card">
+            <h2>Importar manualmente</h2>
+            <p class="hint">Alternativa ao coletor: páginas da HLTV salvas com <b>Ctrl+S → “Página da Web, somente HTML”</b> (partidas, resultados de evento, ranking, stats, arquivo de Majors) ou JSON no formato do README. Depois clique em <b>Curar + treinar</b>.</p>
+            <label class="drop" id="dropZone">
+              <input type="file" id="fileInput" multiple accept=".html,.htm,.json">
+              <span>Arraste arquivos aqui ou clique para escolher</span>
+            </label>
+            <ul id="uploadLog" class="upload-log"></ul>
+          </div>
+        </div>
+
+        <div class="stack">
+          <div class="card">
+            <h2>Treino</h2>
+            <div id="trainBox" class="hint">Ainda não treinado.</div>
+          </div>
+          <div class="card">
+            <h2>Cura dos dados</h2>
+            <div id="reportBox" class="hint">Sem relatório.</div>
+          </div>
+          <div class="card">
+            <h2>Log</h2>
+            <pre id="logs" class="logs"></pre>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="foot">Modelo estatístico (sem IA): Elo por mapa · índice de jogadores · prior do ranking HLTV · veto · Monte Carlo.</footer>
+  <script src="app.js"></script>
+</body>
+</html>

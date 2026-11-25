@@ -1,0 +1,29 @@
+# build C++
+build/
+cmake-build-*/
+*.exe
+*.o
+*.obj
+
+# dados gerados pelo servidor (cache, dataset, modelo treinado)
+data/
+
+# coletor local: cache das paginas, perfil do navegador e config com token
+coletor-local/dados/
+coletor-local/config.json
+
+# Node
+node_modules/
+npm-debug.log*
+
+# segredos / ambiente
+.env
+.env.*
+
+# editores e sistema
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+*.log

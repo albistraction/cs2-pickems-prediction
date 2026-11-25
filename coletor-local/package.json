@@ -1,0 +1,16 @@
+{
+  "name": "pickems-prediction-coletor",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Coletor local assistido: abre a HLTV no seu navegador, coleta as paginas e envia para o site pickems-prediction",
+  "main": "coletor.js",
+  "scripts": {
+    "start": "node coletor.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "playwright": "1.49.1"
+  }
+}
