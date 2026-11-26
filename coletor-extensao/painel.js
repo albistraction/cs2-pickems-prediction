@@ -288,11 +288,12 @@ async function sitePost(cfg, route, body, contentType) {
       let j;
       try { j = JSON.parse(t); } catch { j = { error: t.slice(0, 200) }; }
       if (r.status === 401) throw Object.assign(new Error('token de administrador inválido'), { fatal: true });
-      if (!r.ok) throw Object.assign(new Error(j.error || `HTTP ${r.status}`), { fatal: r.status < 500 });
+      // 400 = só esta página foi recusada (segue a coleta); 403/404 = site ou rota errada (para)
+      if (!r.ok) throw Object.assign(new Error(j.error || `HTTP ${r.status}`), { fatal: r.status === 403 || r.status === 404, rejected: r.status === 400 });
       return j;
     } catch (e) {
       lastErr = e;
-      if (e.fatal) throw e;
+      if (e.fatal || e.rejected) throw e;
       await sleep(3000 * (attempt + 1));
     }
   }
@@ -491,6 +492,11 @@ async function collect(cfg, mode) {
         const p = `/ranking/teams/${m.getUTCFullYear()}/${MONTHS[m.getUTCMonth()]}/${m.getUTCDate()}`;
         const tabId = await open(cfg, p);
         // a HLTV pode mostrar outro ranking se não houver um nessa data: confere o cabeçalho
+        if (!(await inTab(tabId, () => !!document.querySelector('.ranked-team')))) {
+          log(`  ${ymd(m)}: sem ranking publicado nessa semana, pulando`, 'warn');
+          sent.add(`ranking_${ymd(m)}`);
+          continue;
+        }
         const shown = await inTab(tabId, pageRankingDate);
         if (shown && Math.abs(shown - m.getTime()) > 3 * DAY) {
           log(`  ${ymd(m)}: a HLTV mostrou o ranking de ${ymd(new Date(shown))}, pulando`, 'warn');
