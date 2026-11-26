@@ -1,6 +1,7 @@
 #include "hltv.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <filesystem>
 #include <map>
@@ -355,6 +356,54 @@ std::vector<RankedTeam> parseRanking(const std::string& h) {
         if (!t.name.empty()) out.push_back(t);
     }
     return out;
+}
+
+int rankingDay(const std::string& h) {
+    static const char* MONTHS[] = {"january", "february", "march", "april", "may", "june", "july",
+                                   "august", "september", "october", "november", "december"};
+    auto monthOf = [](const std::string& s) {
+        for (int i = 0; i < 12; ++i)
+            if (s.rfind(MONTHS[i], 0) == 0 || (s.size() >= 3 && std::string(MONTHS[i]).rfind(s.substr(0, 3), 0) == 0 && s.size() <= 4))
+                return i + 1;
+        return 0;
+    };
+    // 1) URL: meta pk-source (coletor) ou canonical
+    std::vector<std::string> urls;
+    size_t mp = h.find("name=\"pk-source\"");
+    if (mp != NPOS) urls.push_back(util::attrValue(util::tagAt(h, mp), "content"));
+    urls.push_back(canonicalUrl(h));
+    for (const auto& u : urls) {
+        size_t p = u.find("/ranking/teams/");
+        if (p == NPOS) continue;
+        std::string rest = util::lower(u.substr(p + 15));  // 2025/november/24
+        int y = 0, d = 0;
+        std::string mon;
+        size_t s1 = rest.find('/'), s2 = s1 == NPOS ? NPOS : rest.find('/', s1 + 1);
+        if (s2 == NPOS) continue;
+        y = static_cast<int>(util::toNum(rest.substr(0, s1), 0));
+        mon = rest.substr(s1 + 1, s2 - s1 - 1);
+        d = static_cast<int>(util::toNum(util::digitsAt(rest, s2 + 1), 0));
+        int m = monthOf(mon);
+        if (y > 2000 && m && d >= 1 && d <= 31) return util::daysFromCivil(y, m, d);
+    }
+    // 2) cabeçalho: "... ranking on November 24th 2025" / "November 24th, 2025"
+    std::string low = util::lower(h);
+    for (size_t p = low.find("ranking on "); p != NPOS; p = low.find("ranking on ", p + 1)) {
+        std::string txt = util::stripTags(low.substr(p + 11, 80));
+        std::string mon;
+        size_t i = 0;
+        while (i < txt.size() && std::isspace(static_cast<unsigned char>(txt[i]))) ++i;
+        while (i < txt.size() && std::isalpha(static_cast<unsigned char>(txt[i]))) mon += txt[i++];
+        int m = monthOf(mon);
+        if (!m) continue;
+        std::string ds = util::digitsAt(txt, txt.find_first_of("0123456789", i));
+        size_t yp = txt.find("20", i + ds.size() + 1);
+        if (ds.empty() || yp == NPOS) continue;
+        int d = static_cast<int>(util::toNum(ds, 0));
+        int y = static_cast<int>(util::toNum(txt.substr(yp, 4), 0));
+        if (y > 2000 && d >= 1 && d <= 31) return util::daysFromCivil(y, m, d);
+    }
+    return 0;
 }
 
 // ============================================================================

@@ -84,6 +84,7 @@ std::string trainPath() { return app.dataDir + "/train.json"; }
 
 void installModel(Dataset ds, const Params& p, const json& tinfo) {
     auto eng = std::make_shared<Engine>(p);
+    eng->RK = RankIndex::build(ds.rankHistory);
     eng->run(ds.matches, 0, 0);
     auto dsp = std::make_shared<Dataset>(std::move(ds));
     std::lock_guard<std::mutex> g(app.mu);
@@ -135,7 +136,7 @@ void runPipeline(JobOpts o) {
         json tinfo;
         if (o.retrain && ds.matches.size() >= 30) {
             app.setPhase("treinando", 0.0, "Treinando parametros com " + std::to_string(ds.matches.size()) + " partidas");
-            TrainReport tr = train(ds.matches, p, logfn, app.stop);
+            TrainReport tr = train(ds.matches, ds.rankHistory, p, logfn, app.stop);
             tr.params.sims = p.sims;
             p = tr.params;
             tinfo = tr.toJson();

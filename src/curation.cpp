@@ -102,6 +102,8 @@ Dataset curate(const std::string& rawDir, int majorsWanted, const std::function<
     fs::file_time_type rankingTime{}, playersTime{};
     std::map<std::string, std::pair<fs::file_time_type, EventInfo>> eventsByName;
     bool haveRanking = false, havePlayers = false;
+    std::map<int, std::pair<fs::file_time_type, std::vector<RankedTeam>>> rankSnaps;  // por dia
+    int undatedRanking = 0;
 
     Counter byType, fileErrors;
     int htmlFiles = 0, jsonFiles = 0, duplicates = 0, parseFailed = 0;
@@ -138,12 +140,15 @@ Dataset curate(const std::string& rawDir, int majorsWanted, const std::function<
                     for (auto& e : hltv::parseArchive(body))
                         if (archiveIds.insert(e.id).second) archive.push_back(e);
                     break;
-                case hltv::PageType::Ranking:
-                    if (!haveRanking || mtime > rankingTime) {
-                        auto r = hltv::parseRanking(body);
-                        if (!r.empty()) { ranking = r; rankingTime = mtime; haveRanking = true; }
-                    }
+                case hltv::PageType::Ranking: {
+                    auto r = hltv::parseRanking(body);
+                    if (r.empty()) { ++parseFailed; break; }
+                    int day = hltv::rankingDay(body);
+                    if (day <= 0) { day = util::todayDay(); ++undatedRanking; }  // sem data: ranking atual
+                    auto it = rankSnaps.find(day);
+                    if (it == rankSnaps.end() || mtime > it->second.first) rankSnaps[day] = {mtime, r};
                     break;
+                }
                 case hltv::PageType::Event: {
                     EventInfo ev;
                     if (hltv::parseEvent(body, ev)) {
@@ -198,6 +203,12 @@ Dataset curate(const std::string& rawDir, int majorsWanted, const std::function<
     }
     log("Arquivos lidos: " + std::to_string(htmlFiles) + " HTML, " + std::to_string(jsonFiles) +
         " JSON, " + std::to_string(raw.size()) + " partidas brutas");
+
+    // ranking atual = o mais recente entre as páginas (ou o do JSON importado, se mais novo)
+    if (!rankSnaps.empty()) {
+        auto& latest = rankSnaps.rbegin()->second;
+        if (!haveRanking || latest.first > rankingTime) { ranking = latest.second; haveRanking = true; }
+    }
 
     // ------------------------------------------------------------ 2. Majors
     ds.majors = hltv::groupMajors(archive, static_cast<size_t>(std::max(1, majorsWanted)));
@@ -325,6 +336,17 @@ Dataset curate(const std::string& rawDir, int majorsWanted, const std::function<
     });
 
     // ------------------------------------------------------------ 5. dados atuais
+    for (auto& kv : rankSnaps) {
+        RankSnapshot snap;
+        snap.day = kv.first;
+        snap.date = util::dateString(kv.first);
+        for (auto t : kv.second.second) {
+            t.name = canon(t.name);
+            t.lineup.clear();
+            if (t.rank > 0 && !t.name.empty()) snap.teams.push_back(t);
+        }
+        if (!snap.teams.empty()) ds.rankHistory.push_back(std::move(snap));
+    }
     for (auto& t : ranking) {
         t.name = canon(t.name);
         for (auto& p : t.lineup) p = util::trim(p);
@@ -356,6 +378,11 @@ Dataset curate(const std::string& rawDir, int majorsWanted, const std::function<
     }
 
     if (ranking.empty()) warnings.push_back("Sem pagina de ranking: prior do ranking HLTV desativado.");
+    if (ds.rankHistory.size() < 4)
+        warnings.push_back("Poucos rankings historicos (" + std::to_string(ds.rankHistory.size()) +
+                           "): o treino nao consegue usar o ranking da epoca de cada jogo. Rode a coleta completa.");
+    if (undatedRanking > 1)
+        warnings.push_back(std::to_string(undatedRanking) + " paginas de ranking sem data identificada (tratadas como atuais).");
     if (cleanPlayers.empty()) warnings.push_back("Sem stats atuais de jogadores: usando so o historico das partidas.");
     if (ds.majors.empty()) warnings.push_back("Sem arquivo de Majors: partidas de Major nao serao marcadas.");
     if (ds.matches.size() < 200) warnings.push_back("Poucas partidas (<200): o treino sera pouco confiavel.");
@@ -389,6 +416,9 @@ Dataset curate(const std::string& rawDir, int majorsWanted, const std::function<
                                         : json{{"inicio", ds.matches.front().date}, {"fim", ds.matches.back().date}};
     rep["majors"] = majorsJ;
     rep["ranking"] = ds.ranking.size();
+    rep["rankingsHistoricos"] = ds.rankHistory.size();
+    if (!ds.rankHistory.empty())
+        rep["rankingPeriodo"] = {{"inicio", ds.rankHistory.front().date}, {"fim", ds.rankHistory.back().date}};
     json eventsJ = json::array();
     for (auto& ev : ds.events) eventsJ.push_back({{"nome", ev.name}, {"estagios", ev.stages.size()}});
     rep["eventos"] = eventsJ;

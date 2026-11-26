@@ -441,7 +441,7 @@ function detailHtml(t) {
     </div>
     <div><h3>Composição da força (Elo)</h3><dl class="kv">
       <dt>Elo (histórico)</dt><dd>${num(t.elo)}</dd>
-      <dt>Ranking HLTV</dt><dd>${t.prior == null ? '–' : `${signed(f.ajustePrior)} (${num(t.pontosHLTV)} pts, peso ${pct(t.pesoPrior, 0)})`}</dd>
+      <dt>Ranking HLTV</dt><dd>${f.ranking ? `${signed(f.ranking)} (${t.posicaoRanking ? `#${t.posicaoRanking}` : 'fora do ranking'})` : t.prior == null ? '–' : `${signed(f.ajustePrior)} (${num(t.pontosHLTV)} pts, peso ${pct(t.pesoPrior, 0)})`}</dd>
       ${fRow('Rating dos jogadores', f.rating)}${fRow('K/D', f.kd)}${fRow('ADR', f.adr)}${fRow('KAST', f.kast)}
       ${fRow('Forma recente', f.forma)}
       <dt>Descanso</dt><dd>${signed(f.descanso)} (${t.diasSemJogar < 0 ? '?' : t.diasSemJogar} dias sem jogar)</dd>
@@ -694,6 +694,7 @@ function renderTrain(t) {
       <dt>Forma recente</dt><dd>K ${num(p.kForm, 1)} · memória ${num(p.tauForm)} dias</dd>
       <dt>Confronto direto</dt><dd>K ${num(p.kH2H, 1)}</dd>
       <dt>Descanso / entrosamento</dt><dd>${num(p.wRust, 1)} / ${num(p.wSyn, 1)} Elo</dd>
+      <dt>Ranking HLTV da época</dt><dd>${num(p.wRank, 1)} Elo por ln(posição)</dd>
       <dt>Média móvel dos jogadores</dt><dd>${num(p.playerAlpha, 2)}</dd>
     </dl>`;
 }

@@ -5,6 +5,7 @@
 #include <climits>
 #include <functional>
 #include <map>
+#include <memory>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -30,10 +31,12 @@ struct Params {
     double kH2H = 5;            // K do confronto direto
     double wRust = -10;         // Elo por ln(1 + dias sem jogar)
     double wSyn = 40;           // Elo de entrosamento (lineup estável vs. recém-trocada)
+    double wRank = 60;          // Elo por unidade de ln(posição) no ranking HLTV da época
     // ---- fixos
     double tierS = 1.0, tierA = 0.85, tierB = 0.65, tierC = 0.45;
     double priorMaps = 20;      // nº de mapas em que Elo e ranking HLTV pesam igual
-    double hltvScale = 90;      // Elo por unidade de ln(pontos HLTV)
+    double hltvScale = 90;      // Elo por unidade de ln(pontos HLTV) (só sem ranking histórico)
+    double rankMaxAge = 70;     // ranking mais velho que isso (dias) não é usado
     double sigmaFloor = 25;     // incerteza mínima por simulação
     double sigmaNew = 90;       // incerteza extra para time com poucos mapas
     int sims = 50000;
@@ -41,8 +44,9 @@ struct Params {
     double tierWeight(const std::string& t) const;
 };
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(Params, k, kmap, margin, tau, roster, wRating, wKD, wADR, wKAST, gamma,
-                                                playerAlpha, kForm, tauForm, kH2H, wRust, wSyn, tierS, tierA, tierB,
-                                                tierC, priorMaps, hltvScale, sigmaFloor, sigmaNew, sims)
+                                                playerAlpha, kForm, tauForm, kH2H, wRust, wSyn, wRank, tierS, tierA,
+                                                tierB, tierC, priorMaps, hltvScale, rankMaxAge, sigmaFloor, sigmaNew,
+                                                sims)
 
 struct Metrics {
     double logloss = 0, brier = 0, acc = 0;
@@ -71,8 +75,17 @@ struct TeamState {
     std::string display;
 };
 
+// Rankings HLTV por data, indexados por teamKey (compartilhado entre cópias do Engine)
+struct RankIndex {
+    std::vector<int> days;                                  // ordenado
+    std::vector<std::unordered_map<std::string, int>> pos;  // chave -> posição
+    std::vector<int> size;                                  // nº de times no ranking
+    static std::shared_ptr<const RankIndex> build(const std::vector<RankSnapshot>& h);
+};
+
 class Engine {
 public:
+    std::shared_ptr<const RankIndex> RK;  // vazio = sem ranking histórico
     Params P;
     std::unordered_map<std::string, TeamState> T;     // chave: teamKey
     std::unordered_map<std::string, PlayerState> PL;  // chave: playerKey
@@ -90,6 +103,9 @@ public:
     double restScore(const TeamState& s, int day) const;   // ln(1 + dias sem jogar)
     double stability(const TeamState& s, int day) const;   // 0 = lineup nova, 1 = estável
     double h2h(const std::string& ka, const std::string& kb, int day) const;  // Elo extra para ka contra kb
+    // -ln(posição) no último ranking publicado ANTES de `day`; false se não houver ranking recente
+    bool rankScore(const std::string& key, int day, double& out, int* position = nullptr) const;
+    bool hasRankHistory() const { return RK && RK->days.size() >= 4; }
 
     // Processa partidas em ordem cronológica. Pontua (log-loss) apenas as
     // partidas de índice [scoreFrom, scoreTo) — cada mapa é previsto ANTES da atualização.
@@ -110,7 +126,7 @@ struct TrainReport {
     nlohmann::json toJson() const;
 };
 
-TrainReport train(const std::vector<Match>& ms, const Params& start,
+TrainReport train(const std::vector<Match>& ms, const std::vector<RankSnapshot>& rankHistory, const Params& start,
                   const std::function<void(const std::string&)>& log, const std::atomic<bool>& stop);
 
 // Previsão de um estágio. Com {"event", "stage"} usa a estrutura real da Major

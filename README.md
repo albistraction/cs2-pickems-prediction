@@ -50,7 +50,7 @@ A HLTV usa proteção anti-bot (Cloudflare). Nos testes, servidores, curl e nave
 1. Abra `chrome://extensions` (ou `edge://extensions`), ligue o **Modo do desenvolvedor** e clique em **Carregar sem compactação**. Escolha a pasta `coletor-extensao`.
 2. Clique no ícone da extensão para abrir o painel. Informe a URL do site e o `ADMIN_TOKEN` e clique em **Salvar**; o navegador pede permissão para acessar o site.
 3. Escolha:
-   - **Coleta completa**: as 10 últimas Majors (juntando os estágios), resultados recentes, ranking e stats. Use na primeira vez e depois uma vez por ano. Leva horas.
+   - **Coleta completa**: as últimas Majors (juntando os estágios), resultados recentes, ranking e stats, **todos os jogos de cada time** (times da Major + top N do ranking, em qualquer campeonato, nos últimos N dias) e os **rankings HLTV semanais** desde a Major mais antiga. O treino usa o ranking publicado antes de cada jogo (fator `wRank`). Use na primeira vez e depois uma vez por ano. Leva horas.
    - **Só dados atuais**: ranking, stats dos últimos 90 dias e resultados recentes. Use antes de cada Major.
 
 Uma janela separada navega sozinha, com uma página a cada ~3–5 s (intervalo configurável, com variação aleatória). No modo rápido, a janela de coleta não carrega imagens, anúncios nem scripts de terceiros e lê a página assim que o HTML chega, sem esperar o resto. **Quando aparecer a verificação da Cloudflare, o painel apita e você resolve na janela.** A extensão não tenta resolver o CAPTCHA. Cada página vai direto para `/api/import/html`, e no fim a extensão pede ao servidor para curar e treinar. **Parar** interrompe; a próxima coleta continua de onde parou.

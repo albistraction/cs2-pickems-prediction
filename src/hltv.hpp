@@ -27,6 +27,9 @@ bool parseMatch(const std::string& html, Match& out);
 std::vector<ResultEntry> parseResults(const std::string& html);
 std::vector<ArchiveEvent> parseArchive(const std::string& html);
 std::vector<RankedTeam> parseRanking(const std::string& html);
+// Data do ranking (dia desde 1970) pela URL (/ranking/teams/2025/november/24) ou pelo
+// cabeçalho ("ranking on November 24th 2025"). 0 = não identificada.
+int rankingDay(const std::string& html);
 std::vector<PlayerCurrent> parsePlayerStats(const std::string& html);
 // Página de evento (/events/{id}/...): lê o JSON do simulador multi-estágio da HLTV
 // (data-multi-stage-simulator-json) com todos os estágios, seeds, jogos e resultados.

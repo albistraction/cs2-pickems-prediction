@@ -38,6 +38,14 @@ struct RankedTeam {
 };
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(RankedTeam, name, rank, points, lineup)
 
+// Ranking HLTV de uma data (histórico, para o treino usar o ranking da época de cada jogo)
+struct RankSnapshot {
+    std::string date;
+    int day = 0;
+    std::vector<RankedTeam> teams;  // sem lineup (só nome, posição e pontos)
+};
+NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(RankSnapshot, date, day, teams)
+
 struct PlayerCurrent {
     std::string name, team;
     int maps = 0;
@@ -91,9 +99,11 @@ struct Dataset {
     std::string generatedAt;
     std::vector<Match> matches;
     std::vector<RankedTeam> ranking;
+    std::vector<RankSnapshot> rankHistory;  // ordenado por data
     std::vector<PlayerCurrent> players;
     std::vector<MajorInfo> majors;
     std::vector<EventInfo> events;
     nlohmann::json report = nlohmann::json::object();
 };
-NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(Dataset, generatedAt, matches, ranking, players, majors, events, report)
+NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(Dataset, generatedAt, matches, ranking, rankHistory, players, majors, events,
+                                                report)

@@ -120,6 +120,49 @@ double Engine::h2h(const std::string& ka, const std::string& kb, int day) const 
     return ka < kb ? v : -v;
 }
 
+std::shared_ptr<const RankIndex> RankIndex::build(const std::vector<RankSnapshot>& h) {
+    auto idx = std::make_shared<RankIndex>();
+    std::vector<const RankSnapshot*> v;
+    for (auto& s : h)
+        if (s.day > 0 && !s.teams.empty()) v.push_back(&s);
+    std::sort(v.begin(), v.end(), [](const RankSnapshot* a, const RankSnapshot* b) { return a->day < b->day; });
+    for (auto* s : v) {
+        std::unordered_map<std::string, int> m;
+        int mx = 0;
+        for (auto& t : s->teams) {
+            std::string k = teamKey(t.name);
+            if (k.empty() || t.rank <= 0) continue;
+            auto it = m.find(k);
+            if (it == m.end() || t.rank < it->second) m[k] = t.rank;
+            mx = std::max(mx, t.rank);
+        }
+        if (m.empty()) continue;
+        if (!idx->days.empty() && idx->days.back() == s->day) {
+            idx->pos.back() = std::move(m);
+            idx->size.back() = mx;
+        } else {
+            idx->days.push_back(s->day);
+            idx->pos.push_back(std::move(m));
+            idx->size.push_back(mx);
+        }
+    }
+    return idx;
+}
+
+bool Engine::rankScore(const std::string& key, int day, double& out, int* position) const {
+    if (!RK || RK->days.empty()) return false;
+    auto it = std::lower_bound(RK->days.begin(), RK->days.end(), day);  // primeiro >= day
+    if (it == RK->days.begin()) return false;
+    size_t i = static_cast<size_t>(it - RK->days.begin()) - 1;          // último < day
+    if (day - RK->days[i] > P.rankMaxAge) return false;
+    auto f = RK->pos[i].find(key);
+    // fora do ranking: um pouco abaixo do último colocado
+    int r = f != RK->pos[i].end() ? f->second : static_cast<int>(std::max(30.0, RK->size[i] * 1.25));
+    if (position) *position = f != RK->pos[i].end() ? f->second : 0;
+    out = -std::log(static_cast<double>(r));
+    return true;
+}
+
 void Engine::h2hAdd(const std::string& ka, const std::string& kb, double v, int day) {
     auto& e = H2[h2hKey(ka, kb)];
     double cur = e.first * std::exp(-std::max(0, day - e.second) / P.tau);
@@ -185,6 +228,8 @@ Metrics Engine::run(const std::vector<Match>& ms, size_t scoreFrom, size_t score
         PlayerAgg gb = playerAgg(lb.empty() ? B.lineup : lb);
         double extra = playerBonus(ga) - playerBonus(gb) + P.wRust * (restScore(A, m.day) - restScore(B, m.day)) +
                        P.wSyn * (stability(A, m.day) - stability(B, m.day));
+        double rsA = 0, rsB = 0;
+        if (P.wRank != 0 && rankScore(ka, m.day, rsA) && rankScore(kb, m.day, rsB)) extra += P.wRank * (rsA - rsB);
         double preA = A.r, preB = B.r;
 
         bool scoring = i >= scoreFrom && i < scoreTo;
@@ -252,9 +297,11 @@ json TrainReport::toJson() const {
                 {"passos", steps}};
 }
 
-TrainReport train(const std::vector<Match>& ms, const Params& start,
+TrainReport train(const std::vector<Match>& ms, const std::vector<RankSnapshot>& rankHistory, const Params& start,
                   const std::function<void(const std::string&)>& log, const std::atomic<bool>& stop) {
     TrainReport R;
+    auto rk = RankIndex::build(rankHistory);
+    log("Rankings historicos disponiveis para o treino: " + std::to_string(rk->days.size()));
     R.params = start;
     Params& P = R.params;
     size_t split = ms.size() * 8 / 10;
@@ -263,11 +310,13 @@ TrainReport train(const std::vector<Match>& ms, const Params& start,
 
     auto evalTrain = [&](const Params& p) {
         Engine e(p);
+        e.RK = rk;
         Metrics m = e.run(ms, 0, split);
         return m.count >= 30 ? m.logloss : 1e9;
     };
     auto evalValid = [&](const Params& p) {
         Engine e(p);
+        e.RK = rk;
         return e.run(ms, split, ms.size());
     };
     R.before = evalValid(P);
@@ -284,6 +333,8 @@ TrainReport train(const std::vector<Match>& ms, const Params& start,
         {&P.gamma, 0, 1, "gamma"},     {&P.playerAlpha, 0.02, 0.6, "playerAlpha"},
         {&P.kForm, 0, 60, "kForm"},    {&P.tauForm, 5, 120, "tauForm"}, {&P.kH2H, 0, 30, "kH2H"},
         {&P.wRust, -80, 80, "wRust"},  {&P.wSyn, 0, 200, "wSyn"}};
+    if (rk->days.size() >= 4) dims.push_back({&P.wRank, 0, 400, "wRank"});
+    else P.wRank = 0;
     double best = evalTrain(P);
     log("Treino: log-loss inicial " + std::to_string(best) + " (" + std::to_string(split) + " partidas, " +
         std::to_string(dims.size()) + " parametros)");
@@ -317,7 +368,7 @@ TrainReport train(const std::vector<Match>& ms, const Params& start,
     {
         Params p0 = P;
         p0.wRating = p0.wKD = p0.wADR = p0.wKAST = 0;
-        p0.kForm = p0.kH2H = p0.wRust = p0.wSyn = 0;
+        p0.kForm = p0.kH2H = p0.wRust = p0.wSyn = p0.wRank = 0;
         R.eloOnly = evalValid(p0);
     }
 
@@ -339,7 +390,8 @@ TrainReport train(const std::vector<Match>& ms, const Params& start,
         {"Entrosamento da lineup", [](Params& p) { p.wSyn = 0; }},
         {"Forca por mapa", [](Params& p) { p.kmap = 0; }},
         {"Margem de rounds", [](Params& p) { p.margin = 0; }},
-        {"Troca de roster", [](Params& p) { p.roster = 0; }}};
+        {"Troca de roster", [](Params& p) { p.roster = 0; }},
+        {"Ranking HLTV da epoca", [](Params& p) { p.wRank = 0; }}};
     for (auto& a : abl) {
         if (stop) break;
         Params p0 = P;
@@ -767,7 +819,8 @@ void buildTeams(Engine& eng, const Dataset& data, const std::vector<std::string>
         std::string display = rk != rankMap.end() ? rk->second->name : names[i];
 
         double base = s.r, prior = 0, w = 0;
-        bool hasPrior = points[i] > 0;
+        // com ranking histórico, o ranking entra pelo fator treinado (wRank), não pelo prior fixo
+        bool hasPrior = points[i] > 0 && !eng.hasRankHistory();
         if (hasPrior) {
             prior = meanElo + P.hltvScale * (std::log(points[i]) - meanLn);
             w = P.priorMaps / (P.priorMaps + s.n);
@@ -815,7 +868,10 @@ void buildTeams(Engine& eng, const Dataset& data, const std::vector<std::string>
         double fRest = P.wRust * eng.restScore(s, day);
         double fSyn = P.wSyn * eng.stability(s, day);
         double adj = adjust.count(k) ? adjust[k] : 0;
-        double rating = base + bonus + s.form + fRest + fSyn + adj;
+        double rs = 0, fRank = 0;
+        int rankPos = 0;
+        if (eng.hasRankHistory() && eng.rankScore(k, day + 1, rs, &rankPos)) fRank = P.wRank * rs;
+        double rating = base + bonus + s.form + fRest + fSyn + fRank + adj;
 
         std::vector<double> offs;
         json mapsJ = json::object();
@@ -841,6 +897,7 @@ void buildTeams(Engine& eng, const Dataset& data, const std::vector<std::string>
                         {"forma", s.form},
                         {"descanso", fRest},
                         {"entrosamento", fSyn},
+                        {"ranking", fRank},
                         {"cenario", adj}};
         json medias = {{"rating", agg.rating}, {"kd", agg.kd}, {"adr", agg.adr}, {"kast", agg.kast}};
         int daysOff = s.lastPlayed < 0 ? -1 : day - s.lastPlayed;
@@ -852,6 +909,7 @@ void buildTeams(Engine& eng, const Dataset& data, const std::vector<std::string>
                           {"prior", hasPrior ? json(prior) : json(nullptr)},
                           {"pesoPrior", w},
                           {"pontosHLTV", points[i]},
+                          {"posicaoRanking", rankPos},
                           {"bonusJogadores", bonus},
                           {"ajusteCenario", adj},
                           {"mapasNoHistorico", s.n},
@@ -1280,7 +1338,7 @@ json compareTeams(const Engine& trained, const Dataset& data, const json& req) {
         {"rating", "Rating dos jogadores"}, {"kd", "K/D dos jogadores"},
         {"adr", "ADR dos jogadores"},       {"kast", "KAST dos jogadores"},
         {"forma", "Forma recente"},         {"descanso", "Descanso / inatividade"},
-        {"entrosamento", "Entrosamento"}};
+        {"entrosamento", "Entrosamento"},   {"ranking", "Ranking HLTV atual"}};
     json fatores = json::array();
     for (auto& f : FACT) {
         double va = teamsJ[0]["fatores"][f.first].get<double>();

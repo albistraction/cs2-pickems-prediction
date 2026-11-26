@@ -7,10 +7,12 @@
 
 const BASE = 'https://www.hltv.org';
 const DAY = 86400000;
-const DEFAULTS = { site: '', token: '', majors: 10, diasRecentes: 120, intervaloS: 3, eventoUrl: '', rapido: true, v: 2 };
+const DEFAULTS = { site: '', token: '', majors: 10, diasRecentes: 120, intervaloS: 3, eventoUrl: '', rapido: true,
+  timesTop: 30, diasTimes: 365, rankings: true, v: 3 };
 // config salva antes da v2 tinha intervalo padrão de 8 s: migra para o novo padrão
 function migrate(cfg) {
   if (!cfg.v) { if (cfg.intervaloS === 8) cfg.intervaloS = DEFAULTS.intervaloS; cfg.rapido = true; cfg.v = 2; }
+  if (cfg.v < 3) { cfg.timesTop = DEFAULTS.timesTop; cfg.diasTimes = DEFAULTS.diasTimes; cfg.rankings = true; cfg.v = 3; }
   return cfg;
 }
 const $ = (s) => document.querySelector(s);
@@ -100,7 +102,24 @@ function pageHtml(canonical) {
   root.querySelectorAll('script, style, noscript').forEach((e) => e.remove());
   let html = `<!DOCTYPE html>${root.outerHTML}`;
   if (!/rel="canonical"/i.test(html)) html = html.replace(/<head[^>]*>/i, (m) => `${m}<link rel="canonical" href="${canonical}">`);
+  html = html.replace(/<head[^>]*>/i, (m) => `${m}<meta name="pk-source" content="${canonical.replace(/"/g, '')}">`);
   return html;
+}
+// Times (id + slug) linkados na página, na ordem em que aparecem
+function pageTeamLinks() {
+  const seen = new Set();
+  return [...document.querySelectorAll('a[href^="/team/"]')]
+    .map((a) => a.getAttribute('href').match(/^\/team\/(\d+)\/([^/?#]+)/))
+    .filter((m) => m && !seen.has(m[1]) && seen.add(m[1]))
+    .map((m) => ({ id: m[1], slug: m[2] }));
+}
+// Data no cabeçalho do ranking ("... ranking on November 24th 2025"), se houver
+function pageRankingDate() {
+  const txt = document.body ? document.body.innerText : '';
+  const m = txt.match(/ranking on\s+([A-Za-z]+)\s+(\d{1,2})(?:st|nd|rd|th)?,?\s+(\d{4})/i);
+  if (!m) return null;
+  const d = new Date(`${m[1]} ${m[2]}, ${m[3]} 12:00 UTC`);
+  return Number.isNaN(d.getTime()) ? null : d.getTime();
 }
 function pageArchive() {
   return [...document.querySelectorAll('a[href^="/events/"]')]
@@ -306,6 +325,7 @@ async function collectEvent(cfg, grab) {
   log(`Estrutura da Major (estágios, seeds, confrontos e resultados): ${path}`);
   const tab = await grab(path, `event:${path}:${Date.now()}`);
   if (tab && !(await inTab(tab, pageHasEventJson))) log('Essa página não tem a estrutura de estágios. Informe a URL de um estágio da Major.', 'err');
+  return tab ? (await inTab(tab, pageTeamLinks)) || [] : [];
 }
 
 async function collect(cfg, mode) {
@@ -367,7 +387,7 @@ async function collect(cfg, mode) {
   };
 
   try {
-    await collectEvent(cfg, grab);
+    const eventTeams = await collectEvent(cfg, grab);
     if (mode === 'evento') {
       await flush();
       await persistSent();
@@ -377,7 +397,8 @@ async function collect(cfg, mode) {
 
     status('Ranking atual', 0.01);
     log('Ranking atual de times');
-    await grab('/ranking/teams', 'ranking');
+    const rankTab = await grab('/ranking/teams', 'ranking');
+    const rankTeams = rankTab ? (await inTab(rankTab, pageTeamLinks)) || [] : [];
 
     status('Stats dos jogadores', 0.02);
     log('Stats dos jogadores (últimos 90 dias)');
@@ -385,6 +406,7 @@ async function collect(cfg, mode) {
     await grab(`/stats/players?startDate=${ymd(new Date(today.getTime() - 90 * DAY))}&endDate=${ymd(today)}&rankingFilter=Top50`, 'playerstats');
 
     const matches = new Map();
+    let oldestNeeded = Date.now() - Math.max(cfg.diasRecentes, cfg.diasTimes) * DAY;
     if (mode === 'completa') {
       status('Arquivo de Majors', 0.03);
       log(`Arquivo de Majors (${cfg.majors} mais recentes)`);
@@ -395,6 +417,7 @@ async function collect(cfg, mode) {
         status(`Listas de partidas: ${mj.name}`, 0.04 + 0.1 * (mi / majors.length));
         log(`  ${mj.name} (${mj.start ? ymd(new Date(mj.start)) : '?'})`);
         const old = mj.start && mj.start < Date.now() - 60 * DAY;
+        if (mj.start) oldestNeeded = Math.min(oldestNeeded, mj.start - 30 * DAY);
         for (const id of mj.ids) {
           for (let off = 0; off <= 400; off += 100) {
             const name = `results_event_${id}_${off}`;
@@ -423,6 +446,62 @@ async function collect(cfg, mode) {
         if (!e.unix || e.unix >= cutoff) matches.set(e.id, e);
       }
       if (!entries.length || oldest < cutoff) break;
+    }
+
+    // Partidas de cada time em todos os campeonatos (não só Majors e eventos com estrela)
+    const teams = new Map();
+    for (const t of eventTeams) teams.set(t.id, t);
+    for (const t of rankTeams.slice(0, cfg.timesTop)) teams.set(t.id, t);
+    if (teams.size && cfg.diasTimes > 0) {
+      const cutT = Date.now() - cfg.diasTimes * DAY;
+      log(`Partidas dos times em todos os campeonatos (${teams.size} times, ${cfg.diasTimes} dias)`);
+      let ti = 0;
+      for (const t of teams.values()) {
+        ti++;
+        status(`Partidas de ${t.slug} (${ti}/${teams.size})`, 0.15 + 0.03 * (ti / teams.size));
+        let added = 0;
+        for (let off = 0; off <= 1000; off += 100) {
+          const name = `results_team_${t.id}_${off}`;
+          const tab = await grab(`/results?team=${t.id}${off ? `&offset=${off}` : ''}`, name);
+          const entries = (await inTab(tab, pageResults)) || [];
+          let oldest = Infinity;
+          for (const e of entries) {
+            if (e.unix) oldest = Math.min(oldest, e.unix);
+            if ((!e.unix || e.unix >= cutT) && !matches.has(e.id)) { matches.set(e.id, e); added++; }
+          }
+          if (entries.length < 100 || oldest < cutT) break;
+        }
+        log(`  ${t.slug}: +${added} partidas`);
+      }
+    }
+
+    // Rankings HLTV semanais (segundas-feiras): o treino usa o ranking da época de cada jogo
+    if (cfg.rankings) {
+      const mondays = [];
+      const d = new Date();
+      d.setUTCHours(12, 0, 0, 0);
+      while (d.getUTCDay() !== 1) d.setUTCDate(d.getUTCDate() - 1);
+      const limit = Math.max(oldestNeeded, Date.now() - 4 * 365 * DAY);
+      for (; d.getTime() >= limit; d.setUTCDate(d.getUTCDate() - 7)) mondays.push(new Date(d));
+      const MONTHS = ['january', 'february', 'march', 'april', 'may', 'june', 'july', 'august', 'september', 'october', 'november', 'december'];
+      const todoR = mondays.filter((m) => !sent.has(`ranking_${ymd(m)}`));
+      log(`Rankings históricos: ${mondays.length} semanas desde ${ymd(mondays[mondays.length - 1] || new Date())}, ${todoR.length} para baixar`);
+      for (const [i, m] of todoR.entries()) {
+        status(`Ranking de ${ymd(m)} (${i + 1}/${todoR.length})`, 0.18 + 0.02 * (i / Math.max(1, todoR.length)));
+        const p = `/ranking/teams/${m.getUTCFullYear()}/${MONTHS[m.getUTCMonth()]}/${m.getUTCDate()}`;
+        const tabId = await open(cfg, p);
+        // a HLTV pode mostrar outro ranking se não houver um nessa data: confere o cabeçalho
+        const shown = await inTab(tabId, pageRankingDate);
+        if (shown && Math.abs(shown - m.getTime()) > 3 * DAY) {
+          log(`  ${ymd(m)}: a HLTV mostrou o ranking de ${ymd(new Date(shown))}, pulando`, 'warn');
+          sent.add(`ranking_${ymd(m)}`);
+          continue;
+        }
+        const html = await inTab(tabId, pageHtml, [BASE + p]);
+        while (pending.size >= 4) await Promise.race(pending);
+        if (fatalErr) throw fatalErr;
+        upload(`ranking_${ymd(m)}`, html);
+      }
     }
 
     const todo = [...matches.values()].filter((e) => !sent.has(`match_${e.id}`));
@@ -470,6 +549,9 @@ async function loadConfig() {
   $('#intervalo').value = cfg.intervaloS;
   $('#eventoUrl').value = cfg.eventoUrl || '';
   $('#rapido').checked = cfg.rapido !== false;
+  $('#timesTop').value = cfg.timesTop;
+  $('#diasTimes').value = cfg.diasTimes;
+  $('#rankings').checked = cfg.rankings !== false;
   return cfg;
 }
 
@@ -506,7 +588,10 @@ $('#save').addEventListener('click', async () => {
     intervaloS: Math.max(2, Number($('#intervalo').value) || DEFAULTS.intervaloS),
     eventoUrl: $('#eventoUrl').value.trim(),
     rapido: $('#rapido').checked,
-    v: 2,
+    timesTop: Math.max(0, Number($('#timesTop').value) || 0),
+    diasTimes: Math.max(0, Number($('#diasTimes').value) || 0),
+    rankings: $('#rankings').checked,
+    v: 3,
   };
   await setStore('config', cfg);
   msg.textContent = (await testSite(cfg)) ? 'Salvo. Conexão com o site ok.' : 'Salvo, mas não consegui acessar o site.';
