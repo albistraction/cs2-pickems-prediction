@@ -673,6 +673,22 @@ function renderTrain(t) {
       ${metric('Acerto por mapa', pct(t.depois.acc), `${t.depois.count} mapas avaliados`)}
       ${metric('Brier (erro²)', num(t.depois.brier, 4), `só Elo: ${num(t.semJogadores.logloss, 4)} log-loss`)}
     </div>
+    ${t.backtest && t.backtest.estagios ? `
+    <h3>Pick'Em nas Majors passadas (backtest)</h3>
+    <p class="hint">Cada estágio Swiss foi previsto só com as partidas de antes dele, com os confrontos reais da 1ª rodada. Os 10 picks foram comparados com o resultado real.</p>
+    <div class="metric-grid">
+      ${metric('Acertos em média', `${num(t.backtest.mediaAcertos, 1)} / 10`, `${t.backtest.estagios.length} estágios`)}
+      ${metric('Estágios com 5+', pct(t.backtest.estagiosCom5, 0), `previsto: ${pct(t.backtest.p5PrevistaMedia, 0)}`)}
+    </div>
+    <table class="calib"><tr><th style="text-align:left">Estágio</th><th>Data</th><th>Acertos</th><th>P(5+) prevista</th></tr>
+      ${t.backtest.estagios.map((e) => `<tr title="${esc(e.picks.map((k) => `${k.pick}: ${k.time} (${k.real})${k.acertou ? ' ✓' : ''}`).join(' · '))}"><td style="text-align:left">${esc(e.estagio)}</td><td>${esc(e.data)}</td><td><b>${e.acertos}</b>${e.acertos >= 5 ? ' ✓' : ''}</td><td>${pct(e.p5Prevista, 0)}</td></tr>`).join('')}
+    </table>` : ''}
+    ${t.rodadas && t.rodadas.length > 1 ? `
+    <h3>Rodadas do treino</h3>
+    <p class="hint">O treino roda várias vezes a partir de pontos diferentes e fica com a que mais acerta o Pick'Em passado sem piorar a previsão dos jogos.</p>
+    <table class="calib"><tr><th>Rodada</th><th>Log-loss</th><th>Acerto/mapa</th><th>Pick'Em médio</th><th>Estágios 5+</th></tr>
+      ${t.rodadas.map((r) => `<tr${r.escolhida ? ' style="font-weight:600"' : ''}><td>${r.rodada}${r.escolhida ? ' ★' : ''}</td><td>${num(r.logloss, 4)}</td><td>${pct(r.acerto)}</td><td>${num(r.pickemMedia, 1)}</td><td>${pct(r.pickem5, 0)}</td></tr>`).join('')}
+    </table>` : ''}
     <h3>Margem de erro (calibração)</h3>
     <p class="hint">Quando o modelo deu X% para um time, quantas vezes ele ganhou de fato (mapas da validação). Quanto mais perto as duas colunas, menor o erro.</p>
     <table class="calib"><tr><th>Faixa</th><th>Previsto</th><th>Real</th><th>Erro</th><th>Mapas</th></tr>

@@ -92,6 +92,7 @@ Também dá para importar JSON (`POST /api/import/json`):
 | `AUTO_COLLECT` | `0` | `1` faz o *servidor* tentar coletar direto da HLTV na 1ª execução (normalmente é bloqueado) |
 | `REFRESH_HOURS` | `0` | coleta periódica pelo servidor (idem) |
 | `HLTV_DELAY_MS` | `3500` | intervalo das requisições do servidor |
+| `TRAIN_RESTARTS` | `8` | quantas vezes o treino roda (pontos de partida diferentes); fica a que mais acerta o Pick'Em das Majors passadas |
 
 `PORT` é definido pelo próprio Railway.
 

@@ -109,7 +109,9 @@ public:
 
     // Processa partidas em ordem cronológica. Pontua (log-loss) apenas as
     // partidas de índice [scoreFrom, scoreTo) — cada mapa é previsto ANTES da atualização.
-    Metrics run(const std::vector<Match>& ms, size_t scoreFrom, size_t scoreTo, int untilDay = INT_MAX);
+    // `cursor` (opcional): começa no índice *cursor e devolve onde parou (para rodar em etapas).
+    Metrics run(const std::vector<Match>& ms, size_t scoreFrom, size_t scoreTo, int untilDay = INT_MAX,
+                size_t* cursor = nullptr);
 
 private:
     void lineupChange(TeamState& s, const std::vector<std::string>& lineup, int day);
@@ -117,16 +119,41 @@ private:
     void h2hAdd(const std::string& ka, const std::string& kb, double v, int day);
 };
 
+// Estágio Swiss de uma Major passada, reconstruído das partidas (para o backtest de Pick'Em)
+struct BacktestStage {
+    std::string name;                        // "IEM Cologne Major 2026 · Stage 1"
+    int day = 0;                             // dia do primeiro jogo
+    std::vector<std::string> teams;          // 16 times
+    std::vector<std::pair<int, int>> round1; // confrontos reais da 1ª rodada (índices em teams)
+    std::vector<int> cat;                    // resultado real: 0=3-0 1=3-1 2=3-2 3=2-3 4=1-3 5=0-3
+    std::vector<std::string> pool;           // mapas jogados no estágio
+};
+std::vector<BacktestStage> buildBacktestStages(const Dataset& ds);
+
+// Para cada estágio: estado do modelo só com partidas ANTERIORES, simulação, picks e acertos reais.
+struct BacktestResult {
+    double meanHits = 0;   // acertos médios (de 10)
+    double rate5 = 0;      // fração de estágios com >= 5 acertos
+    double meanP5 = 0;     // P(>=5) média prevista
+    nlohmann::json detail = nlohmann::json::array();
+};
+BacktestResult backtestPickems(const Params& p, const std::shared_ptr<const RankIndex>& rk, const std::vector<Match>& ms,
+                               const std::vector<BacktestStage>& stages, int sims, uint64_t seed);
+
 struct TrainReport {
     Params params;
     Metrics before, after, eloOnly;
     size_t trainMatches = 0, validMatches = 0;
     std::vector<std::string> steps;
     nlohmann::json ablation = nlohmann::json::array();  // importância de cada fator
+    nlohmann::json backtest;                             // Pick'Em nas Majors passadas
+    nlohmann::json restarts = nlohmann::json::array();   // cada rodada do treino
     nlohmann::json toJson() const;
 };
 
-TrainReport train(const std::vector<Match>& ms, const std::vector<RankSnapshot>& rankHistory, const Params& start,
+// Treina várias vezes (pontos de partida diferentes) e escolhe a rodada que mais acerta o
+// Pick'Em das Majors passadas, sem piorar a previsão dos jogos.
+TrainReport train(const Dataset& ds, const Params& start, int restarts,
                   const std::function<void(const std::string&)>& log, const std::atomic<bool>& stop);
 
 // Previsão de um estágio. Com {"event", "stage"} usa a estrutura real da Major

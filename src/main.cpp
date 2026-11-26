@@ -12,6 +12,7 @@
 //   RECENT_DAYS       janela de resultados recentes                       [120]
 //   HLTV_DELAY_MS     intervalo entre requisições à HLTV                  [3500]
 #include <atomic>
+#include <algorithm>
 #include <chrono>
 #include <deque>
 #include <filesystem>
@@ -136,7 +137,7 @@ void runPipeline(JobOpts o) {
         json tinfo;
         if (o.retrain && ds.matches.size() >= 30) {
             app.setPhase("treinando", 0.0, "Treinando parametros com " + std::to_string(ds.matches.size()) + " partidas");
-            TrainReport tr = train(ds.matches, ds.rankHistory, p, logfn, app.stop);
+            TrainReport tr = train(ds, p, std::clamp(util::envInt("TRAIN_RESTARTS", 8), 1, 40), logfn, app.stop);
             tr.params.sims = p.sims;
             p = tr.params;
             tinfo = tr.toJson();
