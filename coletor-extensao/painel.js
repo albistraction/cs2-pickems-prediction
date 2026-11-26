@@ -158,6 +158,10 @@ async function setBlocking(tabId, on) {
       condition: { tabIds: [tabId], domainType: 'thirdParty', excludedRequestDomains: ['cloudflare.com', 'hltv.org'],
         resourceTypes: ['script', 'sub_frame', 'xmlhttprequest', 'stylesheet', 'ping', 'websocket', 'other'] } },
   ] : [];
+  if (!chrome.declarativeNetRequest) {
+    if (on) log('Modo rápido indisponível: a extensão está com o manifest antigo. Em chrome://extensions, clique em ↻ no coletor (ou remova e carregue a pasta coletor-extensao de novo).', 'warn');
+    return;
+  }
   try {
     await chrome.declarativeNetRequest.updateSessionRules({ removeRuleIds: [1, 2], addRules });
   } catch (e) { log(`Modo rápido indisponível: ${e.message}`, 'warn'); }
@@ -286,6 +290,17 @@ async function collect(cfg, mode) {
   const sent = new Set(await getStore('sent', []));
   const persistSent = () => setStore('sent', [...sent]);
   const t0 = Date.now();
+
+  // partidas que o site já tem não são baixadas de novo (vale mesmo após "Esquecer progresso")
+  try {
+    const r = await fetch(`${cfg.site}/api/raw/matches`, { headers: cfg.token ? { 'X-Admin-Token': cfg.token } : {} });
+    if (r.ok) {
+      const { ids = [] } = await r.json();
+      let novos = 0;
+      for (const id of ids) if (!sent.has(`match_${id}`)) { sent.add(`match_${id}`); novos++; }
+      log(`O site já tem ${ids.length} partidas${novos ? ` (${novos} marcadas como feitas)` : ''}; essas serão puladas.`);
+    }
+  } catch { /* site antigo sem a rota: segue só com o progresso local */ }
 
   // abre, extrai HTML, envia; devolve o id da aba para extrações adicionais
   // envios rodam em paralelo com a navegação (até 3 ao mesmo tempo)

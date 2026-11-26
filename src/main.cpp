@@ -385,6 +385,19 @@ int main() {
         sendJson(res, {{"ok", true}, {"tipo", hltv::typeName(type)}, {"arquivo", file}, {"atualizando", curating}});
     });
 
+    // IDs das partidas já guardadas (o coletor pula essas, mesmo sem o progresso local)
+    svr.Get("/api/raw/matches", [](const httplib::Request& req, httplib::Response& res) {
+        if (!authorized(req, res)) return;
+        json ids = json::array();
+        std::error_code ec;
+        for (fs::directory_iterator it(app.rawDir, ec), end; !ec && it != end; it.increment(ec)) {
+            std::string f = it->path().filename().string();
+            if (f.rfind("match_", 0) == 0 && f.size() > 11 && f.compare(f.size() - 5, 5, ".html") == 0)
+                ids.push_back(f.substr(6, f.size() - 11));
+        }
+        sendJson(res, {{"ids", ids}});
+    });
+
     // Upload de dataset JSON: {matches:[...], ranking:[...], players:[...]}
     svr.Post("/api/import/json", [](const httplib::Request& req, httplib::Response& res) {
         if (!authorized(req, res)) return;
