@@ -53,7 +53,7 @@ A HLTV usa proteção anti-bot (Cloudflare). Nos testes, servidores, curl e nave
    - **Coleta completa**: as 10 últimas Majors (juntando os estágios), resultados recentes, ranking e stats. Use na primeira vez e depois uma vez por ano. Leva horas.
    - **Só dados atuais**: ranking, stats dos últimos 90 dias e resultados recentes. Use antes de cada Major.
 
-Uma janela separada navega sozinha, com uma página a cada ~8 s e pausas aleatórias. **Quando aparecer a verificação da Cloudflare, o painel apita e você resolve na janela.** A extensão não tenta resolver o CAPTCHA. Cada página vai direto para `/api/import/html`, e no fim a extensão pede ao servidor para curar e treinar. **Parar** interrompe; a próxima coleta continua de onde parou.
+Uma janela separada navega sozinha, com uma página a cada ~3–5 s (intervalo configurável, com variação aleatória). No modo rápido, a janela de coleta não carrega imagens, anúncios nem scripts de terceiros e lê a página assim que o HTML chega, sem esperar o resto. **Quando aparecer a verificação da Cloudflare, o painel apita e você resolve na janela.** A extensão não tenta resolver o CAPTCHA. Cada página vai direto para `/api/import/html`, e no fim a extensão pede ao servidor para curar e treinar. **Parar** interrompe; a próxima coleta continua de onde parou.
 
 > Isso vai contra os termos de uso da HLTV. Se aparecer "you have been blocked", o IP foi bloqueado temporariamente: espere e aumente o intervalo.
 

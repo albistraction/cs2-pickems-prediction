@@ -7,7 +7,12 @@
 
 const BASE = 'https://www.hltv.org';
 const DAY = 86400000;
-const DEFAULTS = { site: '', token: '', majors: 10, diasRecentes: 120, intervaloS: 8, eventoUrl: '' };
+const DEFAULTS = { site: '', token: '', majors: 10, diasRecentes: 120, intervaloS: 3, eventoUrl: '', rapido: true, v: 2 };
+// config salva antes da v2 tinha intervalo padrão de 8 s: migra para o novo padrão
+function migrate(cfg) {
+  if (!cfg.v) { if (cfg.intervaloS === 8) cfg.intervaloS = DEFAULTS.intervaloS; cfg.rapido = true; cfg.v = 2; }
+  return cfg;
+}
 const $ = (s) => document.querySelector(s);
 
 let running = false;
@@ -137,21 +142,43 @@ async function ensureWorker() {
   }
   const w = await chrome.windows.create({ url: 'about:blank', focused: false, width: 1280, height: 860 });
   worker = { windowId: w.id, tabId: w.tabs[0].id };
+  await setBlocking(worker.tabId, blockingOn);
   return worker;
 }
 
-function waitComplete(tabId, timeoutMs) {
-  return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => { chrome.tabs.onUpdated.removeListener(fn); reject(new Error('tempo esgotado carregando a página')); }, timeoutMs);
-    function fn(id, info) {
-      if (id === tabId && info.status === 'complete') {
-        clearTimeout(timer);
-        chrome.tabs.onUpdated.removeListener(fn);
-        resolve();
-      }
-    }
-    chrome.tabs.onUpdated.addListener(fn);
-  });
+// Modo rápido: só na aba de coleta, não baixa imagens/fontes/mídia nem scripts, iframes e
+// requisições de terceiros (anúncios, rastreadores). A Cloudflare continua liberada para a
+// verificação funcionar normalmente.
+let blockingOn = true;
+async function setBlocking(tabId, on) {
+  const addRules = on ? [
+    { id: 1, priority: 1, action: { type: 'block' },
+      condition: { tabIds: [tabId], resourceTypes: ['image', 'media', 'font'], excludedRequestDomains: ['cloudflare.com'] } },
+    { id: 2, priority: 1, action: { type: 'block' },
+      condition: { tabIds: [tabId], domainType: 'thirdParty', excludedRequestDomains: ['cloudflare.com', 'hltv.org'],
+        resourceTypes: ['script', 'sub_frame', 'xmlhttprequest', 'stylesheet', 'ping', 'websocket', 'other'] } },
+  ] : [];
+  try {
+    await chrome.declarativeNetRequest.updateSessionRules({ removeRuleIds: [1, 2], addRules });
+  } catch (e) { log(`Modo rápido indisponível: ${e.message}`, 'warn'); }
+}
+
+// Navega e volta assim que o HTML da página nova foi lido (readyState != loading), sem
+// esperar imagens e anúncios. Uma marca no documento antigo distingue a página nova da velha.
+async function navigate(tabId, url, timeoutMs) {
+  const mark = Math.random().toString(36).slice(2);
+  try { await inTab(tabId, (m) => { window.__pkMark = m; }, [mark]); } catch { /* about:blank */ }
+  await chrome.tabs.update(tabId, { url });
+  const end = Date.now() + timeoutMs;
+  while (Date.now() < end) {
+    checkStop();
+    await sleep(300);
+    try {
+      const s = await inTab(tabId, (m) => ({ fresh: window.__pkMark !== m, host: location.hostname, ready: document.readyState }), [mark]);
+      if (s && s.fresh && /(^|\.)hltv\.org$/.test(s.host) && s.ready !== 'loading') return;
+    } catch { /* ainda trocando de documento */ }
+  }
+  throw new Error('tempo esgotado carregando a página');
 }
 
 async function inTab(tabId, func, args = []) {
@@ -168,11 +195,12 @@ async function open(cfg, p) {
   const { tabId, windowId } = await ensureWorker();
   for (let attempt = 0; attempt < 3; attempt++) {
     checkStop();
-    const loaded = waitComplete(tabId, 90000);
-    await chrome.tabs.update(tabId, { url: BASE + p });
-    try { await loaded; } catch (e) { log(`  ${e.message}: ${p}`, 'warn'); await sleepStop(5000); continue; }
+    try { await navigate(tabId, BASE + p, 90000); } catch (e) {
+      if (stopFlag) throw e;
+      log(`  ${e.message}: ${p}`, 'warn'); await sleepStop(5000); continue;
+    }
     lastNav = Date.now();
-    await sleep(800);
+    await sleep(150);
     let st = await stateOf(tabId);
     if (st.challenge) {
       await sleepStop(5000); // o desafio às vezes passa sozinho
@@ -260,26 +288,37 @@ async function collect(cfg, mode) {
   const t0 = Date.now();
 
   // abre, extrai HTML, envia; devolve o id da aba para extrações adicionais
+  // envios rodam em paralelo com a navegação (até 3 ao mesmo tempo)
+  const pending = new Set();
+  let fatalErr = null;
+  const flush = () => Promise.allSettled([...pending]);
+  const upload = (name, html) => {
+    const pr = sitePost(cfg, '/api/import/html', html, 'text/html; charset=utf-8')
+      .then(async (r) => {
+        sent.add(name);
+        counters.enviadas++;
+        if (counters.enviadas % 10 === 0) await persistSent();
+        if (r && r.tipo === 'desconhecida') log(`  ${name}: o site não reconheceu a página`, 'warn');
+      })
+      .catch((e) => { log(`  falha ao enviar ${name}: ${e.message}`, 'err'); if (e.fatal) fatalErr = e; })
+      .finally(() => pending.delete(pr));
+    pending.add(pr);
+  };
   const grab = async (p, name, { skipIfSent = false } = {}) => {
+    if (fatalErr) throw fatalErr;
     if (skipIfSent && sent.has(name)) return null;
     const tabId = await open(cfg, p);
     const html = await inTab(tabId, pageHtml, [BASE + p]);
-    try {
-      const r = await sitePost(cfg, '/api/import/html', html, 'text/html; charset=utf-8');
-      sent.add(name);
-      counters.enviadas++;
-      if (counters.enviadas % 10 === 0) await persistSent();
-      if (r && r.tipo === 'desconhecida') log(`  ${name}: o site não reconheceu a página`, 'warn');
-    } catch (e) {
-      log(`  falha ao enviar ${name}: ${e.message}`, 'err');
-      if (e.fatal) throw e;
-    }
+    while (pending.size >= 3) await Promise.race(pending);
+    if (fatalErr) throw fatalErr;
+    upload(name, html);
     return tabId;
   };
 
   try {
     await collectEvent(cfg, grab);
     if (mode === 'evento') {
+      await flush();
       await persistSent();
       status('Concluído', 1);
       return;
@@ -336,7 +375,7 @@ async function collect(cfg, mode) {
     }
 
     const todo = [...matches.values()].filter((e) => !sent.has(`match_${e.id}`));
-    log(`Partidas: ${matches.size} no total, ${todo.length} para baixar (~${fmtDur(todo.length * cfg.intervaloS * 1250)})`);
+    log(`Partidas: ${matches.size} no total, ${todo.length} para baixar (~${fmtDur(todo.length * (cfg.intervaloS * 1250 + 1500))})`);
     const tm = Date.now();
     for (const [i, e] of todo.entries()) {
       const eta = i >= 3 ? ` · faltam ~${fmtDur(((Date.now() - tm) / i) * (todo.length - i))}` : '';
@@ -344,6 +383,8 @@ async function collect(cfg, mode) {
       await grab(e.path, `match_${e.id}`);
     }
 
+    await flush();
+    if (fatalErr) throw fatalErr;
     await persistSent();
     status('Concluído', 1);
     log(`Coleta concluída em ${fmtDur(Date.now() - t0)}.`, 'ok');
@@ -354,19 +395,22 @@ async function collect(cfg, mode) {
       log(`Não consegui iniciar o treino (${e.message}). Clique em "Curar + treinar" no site.`, 'err');
     }
   } finally {
+    await flush();
     await persistSent();
   }
 }
 
 // ------------------------------------------------------------------ interface
 async function loadConfig() {
-  const cfg = { ...DEFAULTS, ...(await getStore('config', {})) };
+  const cfg = migrate({ ...DEFAULTS, ...(await getStore('config', {})) });
+  await setStore('config', cfg);
   $('#site').value = cfg.site;
   $('#token').value = cfg.token;
   $('#majors').value = cfg.majors;
   $('#dias').value = cfg.diasRecentes;
   $('#intervalo').value = cfg.intervaloS;
   $('#eventoUrl').value = cfg.eventoUrl || '';
+  $('#rapido').checked = cfg.rapido !== false;
   return cfg;
 }
 
@@ -400,8 +444,10 @@ $('#save').addEventListener('click', async () => {
     token: $('#token').value.trim(),
     majors: Math.max(1, Number($('#majors').value) || DEFAULTS.majors),
     diasRecentes: Math.max(7, Number($('#dias').value) || DEFAULTS.diasRecentes),
-    intervaloS: Math.max(3, Number($('#intervalo').value) || DEFAULTS.intervaloS),
+    intervaloS: Math.max(2, Number($('#intervalo').value) || DEFAULTS.intervaloS),
     eventoUrl: $('#eventoUrl').value.trim(),
+    rapido: $('#rapido').checked,
+    v: 2,
   };
   await setStore('config', cfg);
   msg.textContent = (await testSite(cfg)) ? 'Salvo. Conexão com o site ok.' : 'Salvo, mas não consegui acessar o site.';
@@ -419,11 +465,13 @@ function setRunning(on) {
 
 async function start(mode) {
   if (running) return;
-  const cfg = { ...DEFAULTS, ...(await getStore('config', {})) };
+  const cfg = migrate({ ...DEFAULTS, ...(await getStore('config', {})) });
   if (!cfg.site) { log('Configure a URL do site primeiro.', 'err'); return; }
   stopFlag = false;
   counters = { paginas: 0, enviadas: 0, verificacoes: 0 };
   setRunning(true);
+  blockingOn = cfg.rapido !== false;
+  if (worker) await setBlocking(worker.tabId, blockingOn);
   log({ completa: '=== Coleta completa ===', atuais: '=== Só dados atuais ===', evento: '=== Atualizar Major ===' }[mode]);
   try {
     await collect(cfg, mode);
