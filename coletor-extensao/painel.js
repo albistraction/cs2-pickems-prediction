@@ -193,24 +193,40 @@ async function inTab(tabId, func, args = []) {
   const [r] = await chrome.scripting.executeScript({ target: { tabId }, func, args });
   return r ? r.result : undefined;
 }
+async function tabAlive(tabId) { try { await chrome.tabs.get(tabId); return true; } catch { return false; } }
 async function stateOf(tabId) {
-  try { return (await inTab(tabId, pageState)) || { challenge: true }; } catch { return { challenge: true }; }
+  try { return (await inTab(tabId, pageState)) || { challenge: true }; } catch {
+    return (await tabAlive(tabId)) ? { challenge: true } : { gone: true };
+  }
 }
+const TabGone = () => Object.assign(new Error('a janela da HLTV foi fechada; abrindo outra'), { gone: true });
 
 async function open(cfg, p) {
   const wait = lastNav + cfg.intervaloS * 1000 * (1 + Math.random() * 0.5) - Date.now();
   if (wait > 0) await sleepStop(wait);
-  const { tabId, windowId } = await ensureWorker();
+  let reopen = 0;
   for (let attempt = 0; attempt < 3; attempt++) {
     checkStop();
+    // a janela da HLTV pode ter sido fechada (ou descartada pelo Chrome): recria se preciso
+    const { tabId, windowId } = await ensureWorker();
     const n0 = Date.now();
-    try { await navigate(tabId, BASE + p, 90000); lastLoadMs = Date.now() - n0; } catch (e) {
-      if (stopFlag) throw e;
-      log(`  ${e.message}: ${p}`, 'warn'); await sleepStop(5000); continue;
+    let st;
+    try {
+      try { await navigate(tabId, BASE + p, 90000); lastLoadMs = Date.now() - n0; } catch (e) {
+        if (stopFlag) throw e;
+        if (!(await tabAlive(tabId))) throw TabGone();
+        log(`  ${e.message}: ${p}`, 'warn'); await sleepStop(5000); continue;
+      }
+      lastNav = Date.now();
+      await sleep(150);
+      st = await stateOf(tabId);
+      if (st.gone) throw TabGone();
+    } catch (e) {
+      if (!e.gone) throw e;
+      log(`  ${e.message}`, 'warn'); worker = null; attempt--; await sleepStop(1000);
+      if (++reopen > 5) throw new Error('a janela da HLTV continua sendo fechada');
+      continue;
     }
-    lastNav = Date.now();
-    await sleep(150);
-    let st = await stateOf(tabId);
     if (st.challenge) {
       await sleepStop(5000); // o desafio às vezes passa sozinho
       st = await stateOf(tabId);
@@ -229,6 +245,7 @@ async function open(cfg, p) {
           await sleep(2000);
         }
         $('#alert').hidden = true;
+        if (st.gone) { log('  a janela da HLTV foi fechada durante a verificação; abrindo outra', 'warn'); worker = null; attempt--; if (++reopen > 5) throw new Error('a janela da HLTV continua sendo fechada'); continue; }
         log('Verificação concluída, continuando.', 'ok');
         await sleep(1500);
       }
@@ -411,10 +428,18 @@ async function collect(cfg, mode) {
     const todo = [...matches.values()].filter((e) => !sent.has(`match_${e.id}`));
     log(`Partidas: ${matches.size} no total, ${todo.length} para baixar (~${fmtDur(todo.length * (cfg.intervaloS * 1250 + 1500))})`);
     const tm = Date.now();
+    let fails = 0;
     for (const [i, e] of todo.entries()) {
       const eta = i >= 3 ? ` · faltam ~${fmtDur(((Date.now() - tm) / i) * (todo.length - i))}` : '';
       status(`Partida ${i + 1}/${todo.length}${eta}`, 0.2 + 0.8 * (i / Math.max(1, todo.length)));
-      await grab(e.path, `match_${e.id}`);
+      try {
+        await grab(e.path, `match_${e.id}`);
+        fails = 0;
+      } catch (err) {
+        if (stopFlag || err.fatal || /bloqueou|verificação não resolvida/.test(err.message)) throw err;
+        log(`  pulando ${e.path}: ${err.message}`, 'warn');
+        if (++fails >= 10) throw new Error('10 partidas seguidas falharam');
+      }
     }
 
     await flush();
