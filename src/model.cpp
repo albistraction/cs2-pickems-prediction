@@ -399,7 +399,7 @@ TrainReport train(const Dataset& ds, const Params& start, int restarts,
         Cand c;
         c.p = descend(p0, r == 0);
         c.valid = evalValid(c.p);
-        c.bt = stages.empty() ? BacktestResult{} : backtestPickems(c.p, rk, ms, stages, 8000, 1000)  // mesma semente: comparação justa entre rodadas;
+        c.bt = stages.empty() ? BacktestResult{} : backtestPickems(c.p, rk, ms, stages, 8000, 1000);  // mesma semente: comparação justa entre rodadas
         log("  rodada " + std::to_string(r + 1) + "/" + std::to_string(restarts) + ": validacao log-loss " +
             std::to_string(c.valid.logloss) + ", acerto " + std::to_string(c.valid.acc * 100).substr(0, 5) + "%" +
             (stages.empty() ? std::string() : ", Pick'Em " + std::to_string(c.bt.meanHits).substr(0, 4) + "/10 em media, " +
