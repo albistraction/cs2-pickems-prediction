@@ -19,6 +19,7 @@ let running = false;
 let stopFlag = false;
 let worker = null;   // { windowId, tabId }
 let lastNav = 0;
+let lastLoadMs = 0;
 let counters = { paginas: 0, enviadas: 0, verificacoes: 0 };
 
 // ------------------------------------------------------------------ util
@@ -151,12 +152,15 @@ async function ensureWorker() {
 // verificação funcionar normalmente.
 let blockingOn = true;
 async function setBlocking(tabId, on) {
+  // Os dados (stats, resultados, estrutura da Major) já vêm no HTML do servidor: nenhum script
+  // é necessário. Scripts no <head> seguram o carregamento, então todos são bloqueados, menos
+  // os da Cloudflare (/cdn-cgi/ e challenges.cloudflare.com), para a verificação funcionar.
   const addRules = on ? [
     { id: 1, priority: 1, action: { type: 'block' },
-      condition: { tabIds: [tabId], resourceTypes: ['image', 'media', 'font'], excludedRequestDomains: ['cloudflare.com'] } },
-    { id: 2, priority: 1, action: { type: 'block' },
-      condition: { tabIds: [tabId], domainType: 'thirdParty', excludedRequestDomains: ['cloudflare.com', 'hltv.org'],
-        resourceTypes: ['script', 'sub_frame', 'xmlhttprequest', 'stylesheet', 'ping', 'websocket', 'other'] } },
+      condition: { tabIds: [tabId], excludedRequestDomains: ['cloudflare.com'],
+        resourceTypes: ['image', 'media', 'font', 'script', 'stylesheet', 'sub_frame', 'xmlhttprequest', 'ping', 'websocket', 'other'] } },
+    { id: 2, priority: 2, action: { type: 'allow' },
+      condition: { tabIds: [tabId], urlFilter: '/cdn-cgi/' } },
   ] : [];
   if (!chrome.declarativeNetRequest) {
     if (on) log('Modo rápido indisponível: a extensão está com o manifest antigo. Em chrome://extensions, clique em ↻ no coletor (ou remova e carregue a pasta coletor-extensao de novo).', 'warn');
@@ -199,7 +203,8 @@ async function open(cfg, p) {
   const { tabId, windowId } = await ensureWorker();
   for (let attempt = 0; attempt < 3; attempt++) {
     checkStop();
-    try { await navigate(tabId, BASE + p, 90000); } catch (e) {
+    const n0 = Date.now();
+    try { await navigate(tabId, BASE + p, 90000); lastLoadMs = Date.now() - n0; } catch (e) {
       if (stopFlag) throw e;
       log(`  ${e.message}: ${p}`, 'warn'); await sleepStop(5000); continue;
     }
@@ -307,9 +312,19 @@ async function collect(cfg, mode) {
   const pending = new Set();
   let fatalErr = null;
   const flush = () => Promise.allSettled([...pending]);
+  // tempos médios, para saber onde está a demora
+  const tm = { n: 0, wait: 0, load: 0, up: 0, upN: 0, kb: 0, blocked: 0 };
+  const report = () => {
+    if (!tm.n) return;
+    log(`  média por página: espera ${(tm.wait / tm.n / 1000).toFixed(1)} s · carregar ${(tm.load / tm.n / 1000).toFixed(1)} s · `
+      + `envio ${tm.upN ? (tm.up / tm.upN / 1000).toFixed(1) : '?'} s (${Math.round(tm.kb / tm.n)} KB) · fila de envio ${(tm.blocked / tm.n / 1000).toFixed(1)} s`);
+    Object.keys(tm).forEach((k) => { tm[k] = 0; });
+  };
   const upload = (name, html) => {
+    const u0 = Date.now();
     const pr = sitePost(cfg, '/api/import/html', html, 'text/html; charset=utf-8')
       .then(async (r) => {
+        tm.up += Date.now() - u0; tm.upN++;
         sent.add(name);
         counters.enviadas++;
         if (counters.enviadas % 10 === 0) await persistSent();
@@ -322,10 +337,14 @@ async function collect(cfg, mode) {
   const grab = async (p, name, { skipIfSent = false } = {}) => {
     if (fatalErr) throw fatalErr;
     if (skipIfSent && sent.has(name)) return null;
+    const g0 = Date.now();
     const tabId = await open(cfg, p);
     const html = await inTab(tabId, pageHtml, [BASE + p]);
-    while (pending.size >= 3) await Promise.race(pending);
+    const g1 = Date.now();
+    while (pending.size >= 4) await Promise.race(pending);
     if (fatalErr) throw fatalErr;
+    tm.n++; tm.load += lastLoadMs; tm.wait += (g1 - g0) - lastLoadMs; tm.blocked += Date.now() - g1; tm.kb += html.length / 1024;
+    if (tm.n >= 20) report();
     upload(name, html);
     return tabId;
   };
@@ -506,7 +525,7 @@ $('#stop').addEventListener('click', () => { stopFlag = true; log('Parando...');
 $('#reset').addEventListener('click', async () => {
   const keys = Object.keys(await chrome.storage.local.get(null)).filter((k) => k === 'sent' || k.startsWith('list:'));
   await chrome.storage.local.remove(keys);
-  log('Progresso esquecido: a próxima coleta baixa tudo de novo.');
+  log('Progresso local esquecido. Partidas que o site já tem continuam sendo puladas.');
 });
 
 window.addEventListener('beforeunload', (e) => { if (running) { e.preventDefault(); e.returnValue = ''; } });
